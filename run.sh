@@ -13,7 +13,7 @@
 #SBATCH -t 48:00:00
 
 cd "$SLURM_SUBMIT_DIR"
-# empty change
+
 # Activate Conda environment
 CONDA_EXE=$(command -v conda)
 if [ -z "$CONDA_EXE" ]; then
@@ -38,5 +38,5 @@ done
 
 echo "------------------------------------------------"
 echo "Starting Python application..."
-python -u src/main.py --train 2>&1
+python -u src/main.py 2>&1
 echo "Job completed successfully."

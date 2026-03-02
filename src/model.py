@@ -16,21 +16,19 @@ DATA ASSUMPTIONS:
 - Input tensors are expected to have consistent dtype and device within a forward pass
 - Sequence lengths can vary but must not exceed max_sequence_length
 - Global features, if present, must match batch size
-- Padding value (-9999.0) is assumed to never occur naturally in data
+- The configured padding value is assumed to never occur naturally in data
 """
 from __future__ import annotations
 
 import logging
 import math
-from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
 from torch import Tensor
-from torch.export import Dim, export as texport, save as tsave
 
-from utils import PADDING_VALUE, validate_config
+from utils import get_precision_config, validate_config
 
 logger = logging.getLogger(__name__)
 
@@ -54,23 +52,14 @@ class SinePositionalEncoding(nn.Module):
         self.register_buffer('pe', pe, persistent=False)
 
     def forward(self, x: Tensor) -> Tensor:
-        """Add positional encoding (computes on-the-fly for long sequences)."""
+        """Add positional encoding and hard-fail on sequence length overflow."""
         seq_len = x.size(1)
 
-        if seq_len <= self.pe.size(1):
-            return x + self.pe[:, :seq_len, :].to(x.dtype)
-
-        # Compute on-the-fly for longer sequences
-        position = torch.arange(0, seq_len, dtype=x.dtype, device=x.device).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, self.d_model, 2, dtype=x.dtype, device=x.device) *
-            (-math.log(10000.0) / self.d_model)
-        )
-        pe = torch.zeros(1, seq_len, self.d_model, dtype=x.dtype, device=x.device)
-        pe[0, :, 0::2] = torch.sin(position * div_term)
-        pe[0, :, 1::2] = torch.cos(position * div_term)
-
-        return x + pe
+        if seq_len > self.pe.size(1):
+            raise ValueError(
+                f"Sequence length overflow: {seq_len} > {self.pe.size(1)}."
+            )
+        return x + self.pe[:, :seq_len, :].to(x.dtype)
 
 
 class FiLMLayer(nn.Module):
@@ -85,7 +74,7 @@ class FiLMLayer(nn.Module):
             self,
             context_dim: int,
             feature_dim: int,
-            clamp_gamma: Optional[float] = 2.0  # Increased from 1.0 for more adaptation
+            clamp_gamma: Optional[float] = 2.0
     ) -> None:
         """
         Initialize FiLM layer.
@@ -100,7 +89,7 @@ class FiLMLayer(nn.Module):
         # Project context to scale and shift parameters
         self.projection = nn.Linear(context_dim, feature_dim * 2)
 
-        # Better initialization for stable training (increased std)
+        # Small-scale initialization for near-identity FiLM at training start
         nn.init.xavier_uniform_(self.projection.weight, gain=0.1)
         nn.init.zeros_(self.projection.bias)
 
@@ -185,8 +174,6 @@ class DecomposedTransformerEncoderLayer(nn.Module):
         """
         super().__init__()
 
-        self.d_model = d_model
-        self.nhead = nhead
         self.norm_first = norm_first
 
         # Multi-head attention with separate dropout
@@ -379,14 +366,17 @@ class PredictionModel(nn.Module):
             input_dim: int,
             global_input_dim: int,
             output_dim: int,
-            d_model: int = 256,
-            nhead: int = 8,
-            num_encoder_layers: int = 6,
-            dim_feedforward: Optional[int] = None,
-            dropout: float = 0.1,
-            attention_dropout: Optional[float] = None,
-            padding_value: float = PADDING_VALUE,
-            film_clamp: Optional[float] = 2.0,
+            d_model: int,
+            nhead: int,
+            num_encoder_layers: int,
+            dim_feedforward: int,
+            dropout: float,
+            attention_dropout: float,
+            max_sequence_length: int,
+            padding_value: float,
+            film_clamp: Optional[float],
+            output_head_divisor: int,
+            output_head_dropout_factor: float,
     ) -> None:
         """
         Initialize prediction model.
@@ -398,25 +388,39 @@ class PredictionModel(nn.Module):
             d_model: Model dimension
             nhead: Number of attention heads
             num_encoder_layers: Number of transformer layers
-            dim_feedforward: Feedforward dimension (defaults to 4*d_model)
+            dim_feedforward: Feedforward dimension
             dropout: Dropout probability
-            attention_dropout: Attention dropout (defaults to dropout)
+            attention_dropout: Attention dropout probability
+            max_sequence_length: Maximum allowed sequence length
             padding_value: Value used for padding (for reference only)
             film_clamp: Clamping value for FiLM parameters
+            output_head_divisor: Divisor for intermediate output projection dimension
+            output_head_dropout_factor: Factor applied to dropout for lighter pre-output dropout
         """
         super().__init__()
 
         if d_model % nhead != 0:
             raise ValueError(f"d_model ({d_model}) must be divisible by nhead ({nhead})")
+        if int(num_encoder_layers) <= 0:
+            raise ValueError("num_encoder_layers must be a positive integer.")
+        if int(dim_feedforward) <= 0:
+            raise ValueError("dim_feedforward must be a positive integer.")
+        if not (0.0 <= float(dropout) <= 1.0):
+            raise ValueError("dropout must be in [0, 1].")
+        if not (0.0 <= float(attention_dropout) <= 1.0):
+            raise ValueError("attention_dropout must be in [0, 1].")
+        if int(max_sequence_length) <= 0:
+            raise ValueError("max_sequence_length must be a positive integer.")
+        if film_clamp is not None and float(film_clamp) <= 0:
+            raise ValueError("film_clamp must be > 0 when provided.")
+        if int(output_head_divisor) <= 0:
+            raise ValueError("output_head_divisor must be a positive integer.")
+        if not (0.0 <= float(output_head_dropout_factor) <= 1.0):
+            raise ValueError("output_head_dropout_factor must be in [0, 1].")
 
         self.d_model = d_model
         self.has_global_features = global_input_dim > 0
-
-        # These really should be set
-        if dim_feedforward is None:
-            dim_feedforward = 4 * d_model
-        if attention_dropout is None:
-            attention_dropout = dropout
+        self.max_sequence_length = int(max_sequence_length)
 
         self.padding_value = padding_value
 
@@ -427,7 +431,9 @@ class PredictionModel(nn.Module):
         )
 
         # Positional encoding
-        self.pos_encoder = SinePositionalEncoding(d_model)
+        self.pos_encoder = SinePositionalEncoding(
+            d_model=d_model, max_len=self.max_sequence_length
+        )
 
         # Initial FiLM if we have global features
         if self.has_global_features:
@@ -456,12 +462,18 @@ class PredictionModel(nn.Module):
         # - Intermediate layer with activation and dropout
         # - Final layer without activation (standard for regression)
         # - Lighter dropout before final projection
+        intermediate_dim = d_model // output_head_divisor
+        if intermediate_dim < 1:
+            raise ValueError(
+                "output_head_divisor is too large for d_model; "
+                f"got d_model={d_model}, output_head_divisor={output_head_divisor}."
+            )
         self.output_proj = nn.Sequential(
-            nn.Dropout(dropout),  # Regular dropout
-            nn.Linear(d_model, d_model // 2),  # Intermediate projection
-            nn.GELU(),  # Activation
-            nn.Dropout(dropout * 0.5),  # Lighter dropout before final
-            nn.Linear(d_model // 2, output_dim)  # Final projection (no activation)
+            nn.Dropout(dropout),
+            nn.Linear(d_model, intermediate_dim),
+            nn.GELU(),
+            nn.Dropout(dropout * output_head_dropout_factor),
+            nn.Linear(intermediate_dim, output_dim),
         )
 
         # Initialize weights
@@ -476,7 +488,7 @@ class PredictionModel(nn.Module):
 
             if isinstance(module, nn.Linear):
                 # Check if this is the final output layer
-                if "output_proj" in name and "3" in name:
+                if name == "output_proj.4":
                     # Very small initialization for final regression layer
                     nn.init.trunc_normal_(module.weight, std=0.01)
                 elif "output_proj" in name:
@@ -513,6 +525,36 @@ class PredictionModel(nn.Module):
         Note: Outputs at padding positions are NOT overwritten.
               The loss function handles masking these positions.
         """
+        if sequence.ndim != 3:
+            raise ValueError(
+                f"Expected sequence shape [B, L, C], got {tuple(sequence.shape)}."
+            )
+        if sequence.size(1) > self.max_sequence_length:
+            raise ValueError(
+                f"Sequence length overflow: {sequence.size(1)} > "
+                f"max_sequence_length={self.max_sequence_length}."
+            )
+        if sequence_mask is not None:
+            if sequence_mask.ndim != 2:
+                raise ValueError(
+                    f"Expected sequence_mask shape [B, L], got {tuple(sequence_mask.shape)}."
+                )
+            if sequence_mask.shape[:2] != sequence.shape[:2]:
+                raise ValueError(
+                    f"sequence_mask shape {tuple(sequence_mask.shape)} does not match "
+                    f"sequence batch/length {tuple(sequence.shape[:2])}."
+                )
+        if self.has_global_features:
+            if global_features is None:
+                raise ValueError(
+                    "Model expects global_features, but none were provided."
+                )
+            if global_features.ndim != 2 or global_features.size(0) != sequence.size(0):
+                raise ValueError(
+                    f"Expected global_features shape [B, G] with B={sequence.size(0)}, "
+                    f"got {tuple(global_features.shape)}."
+                )
+
         # Project input features to model dimension
         x = self.input_proj(sequence)
 
@@ -556,46 +598,45 @@ def create_prediction_model(
 
     data_spec = config["data_specification"]
     model_params = config["model_hyperparameters"]
+    precision = get_precision_config(config)
 
     if device is None:
         device = torch.device("cpu")
 
-    # Extract parameters with improved defaults
-    d_model = model_params.get("d_model", 256)
-    dim_feedforward = model_params.get("dim_feedforward")
-    if dim_feedforward is None:
-        dim_feedforward = 4 * d_model
-
-    # Create model with improved parameters
+    # Create model with explicit config parameters
     model = PredictionModel(
         input_dim=len(data_spec["input_variables"]),
-        global_input_dim=len(data_spec.get("global_variables", [])),
+        global_input_dim=len(data_spec["global_variables"]),
         output_dim=len(data_spec["target_variables"]),
-        d_model=d_model,
-        nhead=model_params.get("nhead", 8),
-        num_encoder_layers=model_params.get("num_encoder_layers", 6),
-        dim_feedforward=dim_feedforward,
-        dropout=float(model_params.get("dropout", 0.1)),
-        attention_dropout=float(model_params.get("attention_dropout", model_params.get("dropout", 0.1))),
-        padding_value=float(data_spec.get("padding_value", PADDING_VALUE)),
-        film_clamp=float(model_params.get("film_clamp", 2.0)),
+        d_model=int(model_params["d_model"]),
+        nhead=int(model_params["nhead"]),
+        num_encoder_layers=int(model_params["num_encoder_layers"]),
+        dim_feedforward=int(model_params["dim_feedforward"]),
+        dropout=float(model_params["dropout"]),
+        attention_dropout=float(model_params["attention_dropout"]),
+        max_sequence_length=int(model_params["max_sequence_length"]),
+        padding_value=float(data_spec["padding_value"]),
+        film_clamp=float(model_params["film_clamp"]),
+        output_head_divisor=int(model_params["output_head_divisor"]),
+        output_head_dropout_factor=float(model_params["output_head_dropout_factor"]),
     )
 
-    model.to(device=device)
+    model.to(device=device, dtype=precision["model_dtype"])
 
     # Conditionally compile the model
     if compile_model:
-        compile_enabled = config.get("miscellaneous_settings", {}).get("torch_compile", False)
-        compile_mode = config.get("miscellaneous_settings", {}).get("compile_mode", "default")
+        misc = config["miscellaneous_settings"]
+        compile_enabled = bool(misc["torch_compile"])
+        compile_mode = str(misc["compile_mode"])
 
         # Check for torch.compile capability
         has_compile = hasattr(torch, "compile")
 
-        if (
-                has_compile
-                and device.type == "cuda"
-                and compile_enabled
-        ):
+        if compile_enabled:
+            if not has_compile:
+                raise RuntimeError("torch.compile is enabled, but this PyTorch build does not support it.")
+            if device.type != "cuda":
+                raise RuntimeError("torch.compile is enabled, but selected device is not CUDA.")
             try:
                 logger.info(f"Attempting torch.compile with mode='{compile_mode}'")
 
@@ -610,156 +651,8 @@ def create_prediction_model(
                 logger.info("Model compiled successfully")
 
             except Exception as e:
-                logger.warning(f"torch.compile failed: {e}. Proceeding without compilation.")
-        elif compile_enabled and device.type != "cuda":
-            logger.info("torch.compile is only enabled for CUDA devices.")
+                raise RuntimeError(f"torch.compile failed: {e}") from e
 
     return model
 
-def export_model(
-        model: nn.Module,
-        example_input: Dict[str, Tensor],
-        save_path: Union[str, Path],
-        config: Optional[Dict[str, Any]] = None,
-) -> None:
-    """
-    Export model with torch.export for deployment.
-
-    Performs validation to ensure exported model produces identical results.
-
-    Args:
-        model: Model to export
-        example_input: Example input dictionary
-        save_path: Path to save exported model
-        config: Optional configuration dictionary
-    """
-    save_path = Path(save_path)
-    save_dir = save_path.parent
-    model_name = save_path.stem
-
-    # Check if export is enabled
-    if config is not None:
-        export_enabled = config.get("miscellaneous_settings", {}).get("torch_export", True)
-        if not export_enabled:
-            return
-
-    model.eval()
-
-    # Get original device
-    original_device = next(model.parameters()).device
-
-    # Unwrap torch.compile wrapper if present
-    if hasattr(model, "_orig_mod"):
-        logger.info("Extracting original model from compiled wrapper")
-        model = model._orig_mod
-
-    # Move to CPU for export (avoids device-specific issues)
-    model = model.to('cpu')
-
-    # Move example inputs to CPU
-    sequence = example_input["sequence"].to('cpu')
-    global_features = example_input.get("global_features")
-    if global_features is not None:
-        global_features = global_features.to('cpu')
-    sequence_mask = example_input.get("sequence_mask")
-    if sequence_mask is not None:
-        sequence_mask = sequence_mask.to('cpu')
-
-    # Ensure batch size > 1 for dynamic shapes
-    batch_size = sequence.shape[0]
-    if batch_size == 1:
-        export_sequence = torch.cat([sequence, sequence], dim=0)
-        export_global = (
-            torch.cat([global_features, global_features], dim=0)
-            if global_features is not None else None
-        )
-        export_mask = (
-            torch.cat([sequence_mask, sequence_mask], dim=0)
-            if sequence_mask is not None else None
-        )
-    else:
-        export_sequence = sequence
-        export_global = global_features
-        export_mask = sequence_mask
-
-    # Prepare kwargs for export
-    kwargs: Dict[str, Tensor] = {"sequence": export_sequence}
-    if export_global is not None:
-        kwargs["global_features"] = export_global
-    if export_mask is not None:
-        kwargs["sequence_mask"] = export_mask
-
-    # Define dynamic shapes (batch dimension only)
-    batch_dim = Dim("batch", min=1, max=1024)
-
-    dynamic_shapes: Dict[str, Any] = {
-        "sequence": {0: batch_dim}
-    }
-    if export_global is not None:
-        dynamic_shapes["global_features"] = {0: batch_dim}
-    if export_mask is not None:
-        dynamic_shapes["sequence_mask"] = {0: batch_dim}
-
-    try:
-        # Export with torch.export
-        with torch.no_grad():
-            exported_program = texport(
-                model,
-                args=(),
-                kwargs=kwargs,
-                dynamic_shapes=dynamic_shapes,
-                strict=False
-            )
-
-        # Save exported model
-        export_path = save_dir / f"{model_name}_exported.pt2"
-        tsave(exported_program, str(export_path))
-        logger.info(f"Model exported successfully to {export_path}")
-
-        # Validate exported model
-        logger.info("Validating exported model...")
-        with torch.no_grad():
-            # Test with original batch size
-            test_kwargs = {
-                "sequence": sequence,
-                "global_features": global_features,
-                "sequence_mask": sequence_mask
-            }
-            test_kwargs = {k: v for k, v in test_kwargs.items() if v is not None}
-
-            original_output = model(**test_kwargs)
-            exported_output = exported_program.module()(**test_kwargs)
-
-            if not torch.allclose(original_output, exported_output, rtol=1e-3, atol=1e-4):
-                logger.warning("Exported model output differs from original!")
-                max_diff = torch.max(torch.abs(original_output - exported_output)).item()
-                logger.warning(f"Maximum difference: {max_diff}")
-            else:
-                logger.info("Exported model validation passed")
-
-    except Exception as exc:
-        logger.error(f"Model export failed: {exc}", exc_info=True)
-
-        # Try fallback without dynamic shapes
-        logger.info("Attempting fallback export with static shapes...")
-        try:
-            with torch.no_grad():
-                static_exported = texport(
-                    model,
-                    args=(),
-                    kwargs=kwargs,
-                    strict=False
-                )
-            static_path = save_dir / f"{model_name}_exported_static.pt2"
-            tsave(static_exported, str(static_path))
-            logger.warning(f"Static shape export succeeded: {static_path}")
-        except Exception as fallback_exc:
-            logger.error(f"Fallback export also failed: {fallback_exc}")
-
-    finally:
-        # Restore to original device if needed
-        if original_device.type != 'cpu':
-            model.to(original_device)
-
-
-__all__ = ["PredictionModel", "create_prediction_model", "export_model"]
+__all__ = ["PredictionModel", "create_prediction_model"]

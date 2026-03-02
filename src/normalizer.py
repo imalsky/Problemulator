@@ -7,7 +7,7 @@ import logging
 import math
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple, Union
+from typing import Any, Dict, List, Set, Tuple
 
 import h5py
 import numpy as np
@@ -15,19 +15,10 @@ import torch
 from torch import Tensor
 from tqdm import tqdm
 
-from utils import DTYPE, PADDING_VALUE
+from hardware import setup_device
+from utils import get_precision_config
 
 logger = logging.getLogger(__name__)
-
-# Normalization constants
-DEFAULT_EPSILON = 1e-9
-DEFAULT_QUANTILE_MEMORY_LIMIT = 50000
-DEFAULT_SYMLOG_PERCENTILE = 0.5
-STATS_CHUNK_SIZE = 4096
-NORMALIZED_VALUE_CLAMP = 50.0
-STATS_MAX_BLOCK_BYTES = 512 * 1024 * 1024  # 512 MiB
-STATS_MAX_SPAN_MULTIPLIER = 16             # span <= multiplier * n_indices
-
 
 class DataNormalizer:
     """
@@ -43,41 +34,54 @@ class DataNormalizer:
         "log-standard", "bool", "none",
     }
 
-    QUANTILE_METHODS = {"iqr", "symlog", "log-min-max"}
+    QUANTILE_METHODS = {"iqr", "symlog"}
 
     def __init__(self, *, config_data: Dict[str, Any]):
         """Initialize normalizer with configuration."""
         self.config = config_data
+        precision = get_precision_config(self.config)
 
-        # FORCE CPU for statistics calculation
-        self.device = torch.device("cpu")  # Changed from setup_device()
-        self.norm_config = self.config.get("normalization", {})
-        self.eps = float(self.norm_config.get("epsilon", DEFAULT_EPSILON))
+        backend = str(self.config["miscellaneous_settings"]["device_backend"])
+        self.device = setup_device(backend)
+        self.dtype = precision["stats_dtype"]
+        self.norm_config = self.config["normalization"]
+        self.eps = float(self.norm_config["epsilon"])
         self.keys_to_process, self.key_methods = self._get_keys_and_methods()
         self._approximated_quantile_keys = set()
 
         # Cached config values
-        self._quantile_memory_limit = int(
-            self.norm_config.get("quantile_max_values_in_memory", DEFAULT_QUANTILE_MEMORY_LIMIT)
+        self._quantile_memory_limit = int(self.norm_config["quantile_max_values_in_memory"])
+        self._stats_chunk_size = int(self.norm_config["stats_chunk_size"])
+        self._stats_max_block_bytes = int(self.norm_config["stats_max_block_bytes"])
+        self._stats_max_span_multiplier = int(self.norm_config["stats_max_span_multiplier"])
+        self._pad_comparison_epsilon = float(self.norm_config["padding_comparison_epsilon"])
+        self._symlog_min_threshold_multiplier = float(
+            self.norm_config["symlog_min_threshold_multiplier"]
         )
-        self._stats_chunk_size = int(self.norm_config.get("stats_chunk_size", STATS_CHUNK_SIZE))
+        self._log_min_max_clamp_min = float(self.norm_config["log_min_max_clamp_min"])
+        self._log_min_max_clamp_max = float(self.norm_config["log_min_max_clamp_max"])
 
         logger.info(f"DataNormalizer initialized on device '{self.device}'.")
 
     def _get_keys_and_methods(self) -> Tuple[Set[str], Dict[str, str]]:
         """Extract variables and their normalization methods from config."""
-        spec = self.config.get("data_specification", {})
+        spec = self.config["data_specification"]
         all_vars = set()
 
         for key in ["input_variables", "global_variables", "target_variables"]:
-            all_vars.update(spec.get(key, []))
+            all_vars.update(spec[key])
 
-        user_key_methods = self.norm_config.get("key_methods", {})
-        default_method = self.norm_config.get("default_method", "standard")
+        user_key_methods = self.norm_config["key_methods"]
+        if not isinstance(user_key_methods, dict):
+            raise ValueError("normalization.key_methods must be a dictionary.")
 
         key_methods = {}
         for key in all_vars:
-            method = user_key_methods.get(key, default_method).lower()
+            if key not in user_key_methods:
+                raise ValueError(
+                    f"Missing explicit normalization method for variable '{key}'."
+                )
+            method = str(user_key_methods[key]).lower()
             if method not in self.METHODS:
                 raise ValueError(f"Unsupported method '{method}' for key '{key}'.")
             key_methods[key] = method
@@ -104,8 +108,8 @@ class DataNormalizer:
         keys_to_load = self.keys_to_process.intersection(available_keys)
 
         if len(keys_to_load) != len(self.keys_to_process):
-            missing = self.keys_to_process - available_keys
-            logger.warning(f"Keys not found in HDF5 and will be skipped: {missing}")
+            missing = sorted(self.keys_to_process - available_keys)
+            raise KeyError(f"Required variables missing from HDF5 files: {missing}")
 
         accumulators = self._initialize_accumulators(keys_to_load)
 
@@ -121,11 +125,16 @@ class DataNormalizer:
 
         for file_stem, indices in grouped_indices.items():
             if file_stem not in file_map:
-                logger.warning(f"Skipping unknown file stem '{file_stem}' in indices.")
-                continue
+                raise KeyError(f"Unknown file stem '{file_stem}' in training indices.")
 
             h5_path = file_map[file_stem]
             with h5py.File(h5_path, "r", swmr=True, libver="latest") as hf:
+                missing_in_file = sorted(k for k in keys_to_load if k not in hf)
+                if missing_in_file:
+                    raise KeyError(
+                        f"Required variables missing in file '{h5_path.name}': {missing_in_file}"
+                    )
+
                 idx_arr = np.asarray(indices, dtype=np.int64)
                 idx_arr.sort()
                 num_chunks = (len(idx_arr) + self._stats_chunk_size - 1) // self._stats_chunk_size
@@ -140,33 +149,44 @@ class DataNormalizer:
                     if chunk_indices.size == 0:
                         continue
 
-                    # Statistics don't depend on the original order; sort for locality.
-                    sorted_indices = np.sort(chunk_indices)
+                    # chunk_indices is already sorted (sliced from sorted idx_arr).
+                    start = int(chunk_indices[0])
+                    end = int(chunk_indices[-1]) + 1
+                    span = end - start
 
-                    # Update one key at a time (reduces peak memory vs building a full dict of tensors).
+                    # Group variables by rank to batch HDF5 reads.
+                    vars_by_rank: Dict[int, List[str]] = {}
                     for key in keys_to_load:
-                        if key not in hf:
-                            continue
+                        rank = hf[key].ndim
+                        vars_by_rank.setdefault(rank, []).append(key)
 
-                        ds = hf[key]
-                        start = int(sorted_indices[0])
-                        end = int(sorted_indices[-1]) + 1
-                        span = end - start
+                    batch_data: Dict[str, Tensor] = {}
+                    for _, var_list in vars_by_rank.items():
+                        for key in var_list:
+                            ds = hf[key]
+                            row_elems = int(np.prod(ds.shape[1:])) if ds.ndim > 1 else 1
+                            est_bytes = span * row_elems * ds.dtype.itemsize
 
-                        row_elems = int(np.prod(ds.shape[1:])) if ds.ndim > 1 else 1
-                        est_bytes = span * row_elems * ds.dtype.itemsize
+                            if (
+                                span <= self._stats_max_span_multiplier * int(chunk_indices.size)
+                                and est_bytes <= self._stats_max_block_bytes
+                            ):
+                                block = ds[start:end]
+                                data_chunk_np = block[chunk_indices - start]
+                            else:
+                                data_chunk_np = ds[chunk_indices]
 
-                        # Prefer a single contiguous read when indices are reasonably dense
-                        # and the implied block size is bounded; otherwise fall back to fancy indexing.
-                        if span <= STATS_MAX_SPAN_MULTIPLIER * int(sorted_indices.size) and est_bytes <= STATS_MAX_BLOCK_BYTES:
-                            block = ds[start:end]
-                            data_chunk_np = block[sorted_indices - start]
-                        else:
-                            data_chunk_np = ds[sorted_indices]
+                            batch_data[key] = torch.as_tensor(
+                                data_chunk_np, device=self.device, dtype=self.dtype
+                            )
 
-                        data_t = torch.as_tensor(data_chunk_np, device=self.device, dtype=DTYPE)
+                    # Update all accumulators in one call per chunk.
+                    if batch_data:
                         self._update_accumulators_with_batch(
-                            {key: data_t}, accumulators, dataset_metadata
+                            batch_data,
+                            accumulators,
+                            dataset_metadata,
+                            source_context=f"file={h5_path.name}, chunk_start={start}, chunk_end={end}",
                         )
 
         logger.info(f"Finished statistics calculation in {time.time() - start_time:.2f}s.")
@@ -230,20 +250,20 @@ class DataNormalizer:
             if method in ("standard", "log-standard", "signed-log"):
                 acc.update({
                     "count": 0,
-                    "mean": torch.tensor(0.0, dtype=DTYPE, device=self.device),
-                    "m2": torch.tensor(0.0, dtype=DTYPE, device=self.device),
+                    "mean": torch.tensor(0.0, dtype=self.dtype, device=self.device),
+                    "m2": torch.tensor(0.0, dtype=self.dtype, device=self.device),
                 })
 
             if method in self.QUANTILE_METHODS:
                 # Fixed-size reservoir buffer (prevents repeated torch.cat reallocations).
-                acc["values"] = torch.empty(memory_limit, dtype=DTYPE, device=self.device)
+                acc["values"] = torch.empty(memory_limit, dtype=self.dtype, device=self.device)
                 acc["values_filled"] = 0
                 acc["total_values_seen"] = 0
 
             if method in ("max-out", "scaled_signed_offset_log", "log-min-max"):
                 acc.update({
-                    "min": torch.tensor(float("inf"), dtype=DTYPE, device=self.device),
-                    "max": torch.tensor(float("-inf"), dtype=DTYPE, device=self.device),
+                    "min": torch.tensor(float("inf"), dtype=self.dtype, device=self.device),
+                    "max": torch.tensor(float("-inf"), dtype=self.dtype, device=self.device),
                 })
 
             if acc:
@@ -297,42 +317,83 @@ class DataNormalizer:
         return filled, total_seen
 
     def _update_accumulators_with_batch(
-            self, batch: Dict[str, Tensor], accumulators: Dict, dataset_metadata: Dict
+            self,
+            batch: Dict[str, Tensor],
+            accumulators: Dict,
+            dataset_metadata: Dict,
+            *,
+            source_context: str,
     ) -> None:
         """Update accumulators with a batch of data using online algorithms."""
         memory_limit = int(self._quantile_memory_limit)
 
-        padding_value = float(
-            self.config.get("data_specification", {}).get("padding_value", PADDING_VALUE)
-        )
+        padding_value = float(self.config["data_specification"]["padding_value"])
 
         for key, data_batch in batch.items():
-            if key not in accumulators:
-                continue
+            method = self.key_methods.get(key)
+            if method is None:
+                raise KeyError(f"Missing normalization method for required key '{key}'.")
 
-            method = self.key_methods[key]
-            key_acc = accumulators[key]
-
-            # Exclude padding from statistics
-            data = data_batch.flatten()
-            valid_mask = torch.isfinite(data) & (torch.abs(data - padding_value) > 1e-6)
-            valid_data = data[valid_mask]
-
-            if valid_data.numel() == 0:
-                logger.debug(f"Skipping batch for key '{key}' - no valid data")
-                continue
-
-            data_for_stats = valid_data
-
-            if method == "log-standard":
-                valid_data = torch.clamp(valid_data, min=self.eps)
-                data_for_stats = torch.log10(valid_data)
-            elif method == "signed-log":
-                data_for_stats = torch.sign(valid_data) * torch.log10(
-                    torch.abs(valid_data) + 1.0
+            # Track sequence lengths for metadata.
+            if data_batch.ndim == 2:
+                current_len = data_batch.shape[1]
+                dataset_metadata["sequence_lengths"][key]["min"] = min(
+                    dataset_metadata["sequence_lengths"][key]["min"], current_len
+                )
+                dataset_metadata["sequence_lengths"][key]["max"] = max(
+                    dataset_metadata["sequence_lengths"][key]["max"], current_len
                 )
 
-            # Update online mean/variance using Welford's algorithm (same logic as your original)
+            data = data_batch.flatten()
+            if data.numel() == 0:
+                raise ValueError(
+                    f"Empty data encountered for key '{key}' during stats update ({source_context})."
+                )
+
+            finite_mask = torch.isfinite(data)
+            if not bool(finite_mask.all()):
+                bad_count = int((~finite_mask).sum().item())
+                raise ValueError(
+                    f"Non-finite values detected for key '{key}' ({bad_count} values) "
+                    f"during stats update ({source_context})."
+                )
+
+            sentinel_mask = torch.abs(data - padding_value) <= self._pad_comparison_epsilon
+            if bool(sentinel_mask.any()):
+                bad_count = int(sentinel_mask.sum().item())
+                raise ValueError(
+                    f"Padding sentinel {padding_value} detected in raw stats input for key '{key}' "
+                    f"({bad_count} values) ({source_context})."
+                )
+
+            if key not in accumulators:
+                if method in ("none", "bool"):
+                    continue
+                raise KeyError(f"No accumulator configured for required key '{key}'.")
+
+            key_acc = accumulators[key]
+
+            data_for_stats = data
+
+            if method == "log-standard":
+                if torch.any(data <= 0):
+                    raise ValueError(
+                        f"Variable '{key}' uses log-standard but contains values <= 0 "
+                        f"({source_context})."
+                    )
+                data_for_stats = torch.log10(data)
+            elif method == "log-min-max":
+                if torch.any(data <= 0):
+                    raise ValueError(
+                        f"Variable '{key}' uses log-min-max but contains values <= 0 "
+                        f"({source_context})."
+                    )
+            elif method == "signed-log":
+                data_for_stats = torch.sign(data) * torch.log10(
+                    torch.abs(data) + 1.0
+                )
+
+            # Update online mean/variance using Welford's parallel algorithm
             if "count" in key_acc:
                 n_new = data_for_stats.numel()
                 if n_new > 0:
@@ -357,51 +418,37 @@ class DataNormalizer:
 
             # Collect values for quantile computation (reservoir sampling)
             if "values" in key_acc:
-                vals = valid_data.flatten()
-                if vals.numel() == 0:
-                    pass
-                else:
-                    filled = int(key_acc.get("values_filled", 0))
-                    t_prev = int(key_acc.get("total_values_seen", 0))
-                    filled, t_prev = self._reservoir_update(
-                        buf=key_acc["values"],
-                        filled=filled,
-                        total_seen=t_prev,
-                        vals=vals,
-                        memory_limit=memory_limit,
-                    )
-                    key_acc["values_filled"] = filled
-                    key_acc["total_values_seen"] = t_prev
+                filled = int(key_acc.get("values_filled", 0))
+                t_prev = int(key_acc.get("total_values_seen", 0))
+                filled, t_prev = self._reservoir_update(
+                    buf=key_acc["values"],
+                    filled=filled,
+                    total_seen=t_prev,
+                    vals=data,
+                    memory_limit=memory_limit,
+                )
+                key_acc["values_filled"] = filled
+                key_acc["total_values_seen"] = t_prev
 
-                    # Mark as approximated if we've seen more than memory_limit
-                    if t_prev > memory_limit:
-                        self._approximated_quantile_keys.add(key)
+                # Mark as approximated if we've seen more than memory_limit
+                if t_prev > memory_limit:
+                    self._approximated_quantile_keys.add(key)
 
             # Update min/max
             if "max" in key_acc:
                 if method == "scaled_signed_offset_log":
-                    log_vals = torch.sign(valid_data) * torch.log10(
-                        torch.abs(valid_data) + 1.0
+                    log_vals = torch.sign(data) * torch.log10(
+                        torch.abs(data) + 1.0
                     )
                     key_acc["min"] = torch.min(key_acc["min"], log_vals.min())
                     key_acc["max"] = torch.max(key_acc["max"], log_vals.max())
                 elif method == "log-min-max":
-                    log_vals = torch.log10(torch.clamp(valid_data, min=self.eps))
+                    log_vals = torch.log10(data)
                     key_acc["min"] = torch.min(key_acc["min"], log_vals.min())
                     key_acc["max"] = torch.max(key_acc["max"], log_vals.max())
                 else:
-                    key_acc["min"] = torch.min(key_acc["min"], valid_data.min())
-                    key_acc["max"] = torch.max(key_acc["max"], valid_data.max())
-
-            # Track sequence lengths
-            if data_batch.ndim == 2:
-                current_len = data_batch.shape[1]
-                dataset_metadata["sequence_lengths"][key]["min"] = min(
-                    dataset_metadata["sequence_lengths"][key]["min"], current_len
-                )
-                dataset_metadata["sequence_lengths"][key]["max"] = max(
-                    dataset_metadata["sequence_lengths"][key]["max"], current_len
-                )
+                    key_acc["min"] = torch.min(key_acc["min"], data.min())
+                    key_acc["max"] = torch.max(key_acc["max"], data.max())
 
     def _finalize_stats(self, accumulators: Dict) -> Dict[str, Any]:
         """Finalize statistics from accumulators with zero-variance protection."""
@@ -410,11 +457,14 @@ class DataNormalizer:
         for key, method in self.key_methods.items():
             stats: Dict[str, Any] = {"method": method, "epsilon": self.eps}
 
-            if key not in accumulators:
-                if method not in ("none", "bool"):
-                    stats["method"] = "none"
+            if method in ("none", "bool"):
                 final_stats[key] = stats
                 continue
+
+            if key not in accumulators:
+                raise ValueError(
+                    f"No statistics accumulator produced for required key '{key}'."
+                )
 
             key_acc = accumulators[key]
 
@@ -475,7 +525,12 @@ class DataNormalizer:
                 max_val = key_acc["max"].item()
                 if max_val - min_val < self.eps:
                     max_val = min_val + self.eps
-                stats.update({"min": min_val, "max": max_val})
+                stats.update({
+                    "min": min_val,
+                    "max": max_val,
+                    "clamp_min": self._log_min_max_clamp_min,
+                    "clamp_max": self._log_min_max_clamp_max,
+                })
 
             final_stats[key] = stats
 
@@ -487,41 +542,17 @@ class DataNormalizer:
         """Compute quantile-based statistics with numerical stability."""
         stats: Dict[str, float] = {}
 
-        def _robust_quantile(tensor: Tensor, q_values: Union[float, Tensor]) -> Tensor:
-            """Compute quantiles with fallback for memory issues."""
-            try:
-                return torch.quantile(tensor, q_values)
-            except RuntimeError as e:
-                if "too large" in str(e).lower() or "out of memory" in str(e).lower():
-                    fallback_size = 1_000_000
-                    if tensor.numel() <= fallback_size:
-                        raise e
-
-                    logger.warning(f"Quantile failed for '{key}' on {tensor.numel():,} elements.")
-
-                    perm = torch.randperm(tensor.numel(), device=tensor.device)[:fallback_size]
-                    subsampled = tensor.flatten()[perm]
-                    return torch.quantile(subsampled, q_values)
-                raise e
-
         if method == "iqr":
-            q_tensor = torch.tensor([0.25, 0.5, 0.75], dtype=DTYPE, device=values.device)
-            q_vals = _robust_quantile(values, q_tensor)
+            q_tensor = torch.tensor([0.25, 0.5, 0.75], dtype=values.dtype, device=values.device)
+            q_vals = torch.quantile(values, q_tensor)
             q1, med, q3 = q_vals[0].item(), q_vals[1].item(), q_vals[2].item()
             iqr = max(q3 - q1, self.eps)  # Prevent zero IQR
             stats.update({"median": med, "iqr": iqr})
 
-        elif method == "log-min-max":
-            log_vals = torch.log10(torch.clamp(values, min=self.eps))
-            min_v, max_v = log_vals.min().item(), log_vals.max().item()
-            stats.update({"min": min_v, "max": max(max_v, min_v + self.eps)})
-
         elif method == "symlog":
-            percentile = self.norm_config.get(
-                "symlog_percentile", DEFAULT_SYMLOG_PERCENTILE
-            )
-            thr = _robust_quantile(torch.abs(values), percentile).item()
-            thr = max(thr, self.eps * 100)  # Ensure reasonable threshold
+            percentile = float(self.norm_config["symlog_percentile"])
+            thr = torch.quantile(torch.abs(values), percentile).item()
+            thr = max(thr, self.eps * self._symlog_min_threshold_multiplier)
 
             abs_v = torch.abs(values)
             mask = abs_v > thr
@@ -538,14 +569,18 @@ class DataNormalizer:
         return stats
 
     @staticmethod
-    def normalize_tensor(x: Tensor, method: str, stats: Dict[str, Any]) -> Tensor:
+    def normalize_tensor(
+        x: Tensor, method: str, stats: Dict[str, Any], *, normalized_value_clamp: float
+    ) -> Tensor:
         """Apply normalization to a tensor."""
-        x = x.to(DTYPE)
+        if not x.is_floating_point():
+            raise TypeError(
+                f"normalize_tensor requires a floating-point tensor, got {x.dtype}."
+            )
 
         if method in ("none", "bool") or not stats:
             return x
 
-        eps = stats.get("epsilon", DEFAULT_EPSILON)
         result = x
 
         try:
@@ -553,7 +588,9 @@ class DataNormalizer:
                 result = (x - stats["mean"]) / stats["std"]
 
             elif method == "log-standard":
-                x_safe = torch.log10(torch.clamp(x, min=eps))
+                if torch.any(x <= 0):
+                    raise ValueError("log-standard normalization received values <= 0.")
+                x_safe = torch.log10(x)
                 result = (x_safe - stats["log_mean"]) / stats["log_std"]
 
             elif method == "signed-log":
@@ -561,12 +598,14 @@ class DataNormalizer:
                 result = (y - stats["mean"]) / stats["std"]
 
             elif method == "log-min-max":
-                log_x = torch.log10(torch.clamp(x, min=eps))
+                if torch.any(x <= 0):
+                    raise ValueError("log-min-max normalization received values <= 0.")
+                log_x = torch.log10(x)
                 denom = stats["max"] - stats["min"]
                 if denom <= 0:
                     raise ValueError("log-min-max stats have zero range")
                 normed = (log_x - stats["min"]) / denom
-                result = torch.clamp(normed, 0.0, 1.0)
+                result = torch.clamp(normed, stats["clamp_min"], stats["clamp_max"])
 
             elif method == "max-out":
                 result = x / stats["max_val"]
@@ -590,16 +629,15 @@ class DataNormalizer:
                 result = y / sf
 
             else:
-                logger.warning(f"Unsupported method '{method}'. Returning raw tensor.")
+                raise ValueError(f"Unsupported normalization method '{method}'.")
 
         except KeyError as e:
-            logger.error(f"Missing stat '{e}' for '{method}'. Returning raw tensor.")
-            return x
+            raise KeyError(f"Missing stat '{e}' for normalization method '{method}'.") from e
 
         # Clamp unbounded normalizations
         if method in ("standard", "log-standard", "signed-log", "iqr"):
             result = torch.clamp(
-                result, -NORMALIZED_VALUE_CLAMP, NORMALIZED_VALUE_CLAMP
+                result, -normalized_value_clamp, normalized_value_clamp
             )
 
         return result
@@ -607,7 +645,10 @@ class DataNormalizer:
     @staticmethod
     def denormalize_tensor(x: Tensor, method: str, stats: Dict[str, Any]) -> Tensor:
         """Reverse normalization on a tensor."""
-        x = x.to(DTYPE)
+        if not x.is_floating_point():
+            raise TypeError(
+                f"denormalize_tensor requires a floating-point tensor, got {x.dtype}."
+            )
 
         if method in ("none", "bool"):
             return x
@@ -616,8 +657,6 @@ class DataNormalizer:
             raise ValueError(f"No stats for denormalization with method '{method}'")
 
         dtype, device = x.dtype, x.device
-        eps = stats.get("epsilon", DEFAULT_EPSILON)
-
         def to_t(val: float) -> Tensor:
             """Convert scalar to tensor with correct dtype/device."""
             return torch.as_tensor(val, dtype=dtype, device=device)
@@ -633,8 +672,10 @@ class DataNormalizer:
             return torch.sign(unscaled_log) * (10 ** torch.abs(unscaled_log) - 1.0)
 
         elif method == "log-min-max":
+            clamp_min = to_t(stats["clamp_min"])
+            clamp_max = to_t(stats["clamp_max"])
             unscaled = (
-                torch.clamp(x, 0, 1)
+                torch.clamp(x, clamp_min, clamp_max)
                 .mul(to_t(stats["max"] - stats["min"]))
                 .add(to_t(stats["min"]))
             )
@@ -666,42 +707,5 @@ class DataNormalizer:
 
         else:
             raise ValueError(f"Unsupported denormalization method '{method}'")
-
-    @staticmethod
-    def denormalize(
-            v: Union[Tensor, List, float, bool, None],
-            metadata: Dict[str, Any],
-            var_name: str,
-    ) -> Union[Tensor, List, float, bool, None]:
-        """Denormalize a value using metadata."""
-        if v is None:
-            return None
-
-        method = metadata["normalization_methods"].get(var_name, "none")
-        if method in ("none", "bool"):
-            return v
-
-        stats = metadata["per_key_stats"].get(var_name)
-        if not stats:
-            raise ValueError(f"No stats for '{var_name}' in metadata.")
-
-        is_scalar = not isinstance(v, (torch.Tensor, list))
-        is_list = isinstance(v, list)
-
-        tensor_v = (
-            torch.as_tensor(v, dtype=DTYPE)
-            if not isinstance(v, torch.Tensor)
-            else v.to(DTYPE)
-        )
-
-        denorm_tensor = DataNormalizer.denormalize_tensor(tensor_v, method, stats)
-
-        if is_scalar:
-            return denorm_tensor.item()
-        elif is_list:
-            return denorm_tensor.tolist()
-        else:
-            return denorm_tensor
-
 
 __all__ = ["DataNormalizer"]

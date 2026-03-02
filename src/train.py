@@ -5,39 +5,23 @@ import gc
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
-
-import optuna
+from typing import Any, Callable, Dict, List, Tuple
 import torch
 from torch import nn, optim
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
     LinearLR,
-    ReduceLROnPlateau,
     SequentialLR,
 )
 from torch.utils.data import DataLoader
 
 from dataset import create_dataset
 from hardware import should_pin_memory
-from model import create_prediction_model, export_model
-from utils import save_json, seed_everything
+from model import create_prediction_model
+from utils import get_precision_config, save_json, seed_everything
 
 logger = logging.getLogger(__name__)
-
-# Training defaults
-DEFAULT_BATCH_SIZE = 256
-DEFAULT_EPOCHS = 100
-DEFAULT_LR = 1e-4
-DEFAULT_OPTIMIZER = "adamw"
-DEFAULT_GRAD_CLIP = 1.0
-DEFAULT_EARLY_STOPPING_PATIENCE = 20
-DEFAULT_MIN_DELTA = 1e-6
-DEFAULT_GRADIENT_ACCUMULATION = 1
-DEFAULT_NUM_WORKERS = 8
-DEFAULT_MAX_BATCH_FAILURE_RATE = 0.10
-
 
 class DevicePrefetchLoader:
     """
@@ -46,16 +30,26 @@ class DevicePrefetchLoader:
     Overlaps data transfer with computation for better GPU utilization.
     """
     
-    def __init__(self, loader: DataLoader, device: torch.device):
+    def __init__(
+        self,
+        loader: DataLoader,
+        device: torch.device,
+        forward_dtype: torch.dtype,
+        loss_dtype: torch.dtype,
+    ):
         """
         Initialize prefetch loader.
         
         Args:
             loader: Base DataLoader
             device: Target device for data
+            forward_dtype: Dtype for model inputs
+            loss_dtype: Dtype for targets/loss
         """
         self.loader = loader
         self.device = device
+        self.forward_dtype = forward_dtype
+        self.loss_dtype = loss_dtype
         self.is_cuda = self.device.type == 'cuda'
     
     def __iter__(self):
@@ -100,11 +94,11 @@ class DevicePrefetchLoader:
         # Move inputs
         device_inputs = {}
         device_inputs["sequence"] = inputs["sequence"].to(
-            self.device, non_blocking=non_blocking
+            self.device, dtype=self.forward_dtype, non_blocking=non_blocking
         )
         if "global_features" in inputs:
             device_inputs["global_features"] = inputs["global_features"].to(
-                self.device, non_blocking=non_blocking
+                self.device, dtype=self.forward_dtype, non_blocking=non_blocking
             )
         
         # Move masks (keep as boolean)
@@ -114,7 +108,7 @@ class DevicePrefetchLoader:
         )
         
         # Move targets and target masks
-        device_targets = targets.to(self.device, non_blocking=non_blocking)
+        device_targets = targets.to(self.device, dtype=self.loss_dtype, non_blocking=non_blocking)
         device_tgt_masks = tgt_masks.to(self.device, non_blocking=non_blocking)
         
         return device_inputs, device_masks, device_targets, device_tgt_masks
@@ -133,7 +127,6 @@ class ModelTrainer:
     - Model initialization and optimization
     - Training loop with validation
     - Checkpointing and early stopping
-    - Model export for deployment
     - Correct padding mask handling throughout
     """
 
@@ -145,8 +138,6 @@ class ModelTrainer:
             processed_dir: Path,
             splits: Dict[str, List[Tuple[str, int]]],
             collate_fn: Callable,
-            optuna_trial: Optional[optuna.Trial] = None,
-            profiler: Optional[Any] = None,
     ) -> None:
         """
         Initialize trainer.
@@ -158,39 +149,29 @@ class ModelTrainer:
             processed_dir: Directory with preprocessed data
             splits: Train/val/test splits
             collate_fn: Collation function for DataLoader
-            optuna_trial: Optional Optuna trial for hyperparameter search
-            profiler: Optional profiler
         """
         self.cfg = config
         self.device = device
         self.save_dir = save_dir
         self.model = None
-        self.current_epoch = 0
-        self.trial = optuna_trial
-        self.profiler = profiler
 
         # Extract configuration
-        misc_cfg = self.cfg.get("miscellaneous_settings", {})
-        train_params = self.cfg.get("training_hyperparameters", {})
-
-        self.max_batch_failure_rate = train_params.get(
-            "max_batch_failure_rate", DEFAULT_MAX_BATCH_FAILURE_RATE
-        )
+        misc_cfg = self.cfg["miscellaneous_settings"]
+        train_params = self.cfg["training_hyperparameters"]
+        self.precision = get_precision_config(self.cfg)
+        self.forward_dtype = self.precision["forward_dtype"]
+        self.loss_dtype = self.precision["loss_dtype"]
+        self._using_prefetch_loader = False
 
         if self.device.type == "cuda":
             logger.info("Applying GPU performance optimizations")
 
             # Respect config: do not auto-enable AMP
-            if train_params.get("use_amp", False):
+            if bool(train_params["use_amp"]):
                 logger.info("AMP enabled per config")
 
-            current_batch_size = train_params.get("batch_size", DEFAULT_BATCH_SIZE)
-            if self.trial is None and current_batch_size < 256:
-                logger.info(f"Increasing batch size from {current_batch_size} to 256")
-                train_params["batch_size"] = 256
-
         # Enable anomaly detection if requested
-        if misc_cfg.get("detect_anomaly", False):
+        if bool(misc_cfg["detect_anomaly"]):
             torch.autograd.set_detect_anomaly(True)
             logger.warning("Anomaly detection enabled - training will be slower.")
 
@@ -199,7 +180,8 @@ class ModelTrainer:
 
         # Save splits for reproducibility in COMPACT format
         compressed_splits = compress_splits(splits)
-        save_json(compressed_splits, self.save_dir / "dataset_splits.json", compact=True)
+        if not save_json(compressed_splits, self.save_dir / "dataset_splits.json", compact=True):
+            raise RuntimeError("Failed to save dataset_splits.json.")
 
         # Initialize components
         self._setup_datasets(processed_dir, splits)
@@ -212,7 +194,11 @@ class ModelTrainer:
         self._save_metadata()
 
         # Check if validation set exists
-        self.has_val = self.val_loader is not None and len(self.val_loader) > 0
+        self.has_val = len(self.val_loader) > 0
+        if not self.has_val:
+            raise RuntimeError("Validation DataLoader is empty.")
+        if len(self.test_loader) == 0:
+            raise RuntimeError("Test DataLoader is empty.")
 
         # Clean up memory
         gc.collect()
@@ -226,26 +212,25 @@ class ModelTrainer:
     ) -> None:
         """Create datasets from preprocessed data."""
         # Check if using subset
-        fraction = self.cfg.get("training_hyperparameters", {}).get(
-            "dataset_fraction_to_use", 1.0
-        )
+        fraction = float(self.cfg["training_hyperparameters"]["dataset_fraction_to_use"])
         
         if 0.0 < fraction < 1.0:
             logger.warning(f"Using only {fraction:.0%} of the dataset.")
-            random_seed = self.cfg.get("miscellaneous_settings", {}).get(
-                "random_seed", 42
-            )
+            random_seed = int(self.cfg["miscellaneous_settings"]["random_seed"])
             seed_everything(random_seed)
         
         # Dataset directories
         train_dir = processed_dir / "train"
         val_dir = processed_dir / "val"
         test_dir = processed_dir / "test"
+
+        missing_dirs = [d for d in (train_dir, val_dir, test_dir) if not d.exists()]
+        if missing_dirs:
+            raise RuntimeError(
+                f"Missing required processed split directories: {[str(p) for p in missing_dirs]}"
+            )
         
-        if not train_dir.exists():
-            raise RuntimeError("No training directory found.")
-        
-        def get_indices(split_data: List[Tuple[str, int]]) -> List[int]:
+        def get_indices(split_data: List[Tuple[str, int]]) -> List[int] | None:
             """Get indices, optionally sampling a fraction."""
             num_samples = len(split_data)
             if num_samples == 0:
@@ -256,7 +241,8 @@ class ModelTrainer:
                 k = max(1, int(num_samples * fraction))
                 return random.sample(range(num_samples), k)
             
-            return list(range(num_samples))
+            # Full split requested: keep identity indexing to avoid large list materialization.
+            return None
         
         # Create datasets
         train_idx = get_indices(splits["train"])
@@ -264,70 +250,60 @@ class ModelTrainer:
         test_idx = get_indices(splits["test"])
         
         self.train_ds = create_dataset(train_dir, self.cfg, train_idx)
-        self.val_ds = (
-            create_dataset(val_dir, self.cfg, val_idx) if val_dir.exists() else None
-        )
-        self.test_ds = (
-            create_dataset(test_dir, self.cfg, test_idx) if test_dir.exists() else None
-        )
+        self.val_ds = create_dataset(val_dir, self.cfg, val_idx)
+        self.test_ds = create_dataset(test_dir, self.cfg, test_idx)
         
         logger.info(
             f"Datasets ready - train:{len(self.train_ds):,}  "
-            f"val:{len(self.val_ds or []):,}  test:{len(self.test_ds or []):,}"
+            f"val:{len(self.val_ds):,}  test:{len(self.test_ds):,}"
         )
     
     def _build_dataloaders(
         self, collate_fn: Callable, misc_cfg: Dict, train_cfg: Dict
     ) -> None:
         """Create DataLoaders with optimized settings."""
-        pin_memory = should_pin_memory()
-        num_workers = misc_cfg.get("num_workers", DEFAULT_NUM_WORKERS)
-        
-        if misc_cfg.get("autotune_num_workers", False) and num_workers < 8 and self.device.type == "cuda":
-            new_workers = 8
-            logger.info(f"autotune_num_workers=True → increasing num_workers from {num_workers} to {new_workers}")
-            num_workers = new_workers        
-
+        pin_memory = should_pin_memory(self.device)
+        num_workers = int(misc_cfg["num_workers"])
 
         # Common DataLoader arguments
         dl_common = dict(
-            batch_size=train_cfg.get("batch_size", DEFAULT_BATCH_SIZE),
+            batch_size=int(train_cfg["batch_size"]),
             num_workers=num_workers,
             collate_fn=collate_fn,
             pin_memory=pin_memory,
         )
-
-        # Optional: persistent workers / prefetch only if explicitly enabled
-        if num_workers > 0 and misc_cfg.get("persistent_workers", False):
+        if pin_memory and self.device.type == "cuda":
+            dl_common["pin_memory_device"] = "cuda"
+        if num_workers > 0:
             dl_common["persistent_workers"] = True
-            dl_common["prefetch_factor"] = int(misc_cfg.get("prefetch_factor", 2))
+            dl_common["prefetch_factor"] = 2
 
         # Create DataLoaders
         self.train_loader = DataLoader(
             self.train_ds, shuffle=True, drop_last=False, **dl_common
         )
-        
-        self.val_loader = (
-            DataLoader(self.val_ds, shuffle=False, drop_last=False, **dl_common)
-            if self.val_ds
-            else None
+
+        self.val_loader = DataLoader(
+            self.val_ds, shuffle=False, drop_last=False, **dl_common
+        )
+
+        self.test_loader = DataLoader(
+            self.test_ds, shuffle=False, drop_last=False, **dl_common
         )
         
-        self.test_loader = (
-            DataLoader(self.test_ds, shuffle=False, drop_last=False, **dl_common)
-            if self.test_ds
-            else None
-        )
-        
-        # Wrap with device prefetching for async transfers
-        if self.device.type != "cpu":
-            logger.info(f"Using DevicePrefetchLoader for {self.device.type.upper()} transfers")
-            
-            self.train_loader = DevicePrefetchLoader(self.train_loader, self.device)
-            if self.val_loader:
-                self.val_loader = DevicePrefetchLoader(self.val_loader, self.device)
-            if self.test_loader:
-                self.test_loader = DevicePrefetchLoader(self.test_loader, self.device)
+        # Wrap with device prefetching for async CUDA transfers
+        if self.device.type == "cuda":
+            logger.info("Using DevicePrefetchLoader for CUDA transfers")
+            self.train_loader = DevicePrefetchLoader(
+                self.train_loader, self.device, self.forward_dtype, self.loss_dtype
+            )
+            self.val_loader = DevicePrefetchLoader(
+                self.val_loader, self.device, self.forward_dtype, self.loss_dtype
+            )
+            self.test_loader = DevicePrefetchLoader(
+                self.test_loader, self.device, self.forward_dtype, self.loss_dtype
+            )
+            self._using_prefetch_loader = True
     
     def _build_model(self) -> None:
         """Create and initialize the model."""
@@ -337,9 +313,9 @@ class ModelTrainer:
     
     def _build_optimizer(self, tp: Dict) -> None:
         """Create optimizer with weight decay groups."""
-        opt_name = tp.get("optimizer", DEFAULT_OPTIMIZER).lower()
-        lr = tp.get("learning_rate", DEFAULT_LR)
-        wd = tp.get("weight_decay", 1e-5)
+        opt_name = str(tp["optimizer"]).lower()
+        lr = float(tp["learning_rate"])
+        wd = float(tp["weight_decay"])
         
         # Separate parameters for weight decay
         decay, no_decay = [], []
@@ -359,65 +335,49 @@ class ModelTrainer:
             {"params": no_decay, "weight_decay": 0.0},
         ]
         
-        # Create optimizer
-        if opt_name == "adam":
-            self.optimizer = optim.Adam(groups, lr=lr)
-        elif opt_name == "sgd":
-            self.optimizer = optim.SGD(groups, lr=lr, momentum=0.9)
-        else:  # Default to AdamW
-            self.optimizer = optim.AdamW(groups, lr=lr, fused=(self.device.type == "cuda"))
+        if opt_name != "adamw":
+            raise ValueError(f"Unsupported optimizer '{opt_name}'. Only 'adamw' is allowed.")
+        self.optimizer = optim.AdamW(groups, lr=lr, fused=(self.device.type == "cuda"))
         
         logger.info(f"Optimizer: {opt_name}  lr={lr:.2e}  wd={wd:.2e}")
     
     def _build_scheduler(self, tp: Dict) -> None:
         """Create learning rate scheduler."""
-        scheduler_type = tp.get("scheduler_type", "reduce_on_plateau").lower()
-        
-        if scheduler_type == "cosine":
-            epochs = tp.get("epochs", DEFAULT_EPOCHS)
-            warmup_epochs = tp.get("warmup_epochs", 0)
-            
-            if warmup_epochs >= epochs:
-                raise ValueError("warmup_epochs must be less than total epochs.")
-            
-            # Main cosine scheduler
-            main_scheduler = CosineAnnealingLR(
-                self.optimizer,
-                T_max=epochs - warmup_epochs,
-                eta_min=tp.get("min_lr", 1e-8),
+        scheduler_type = str(tp["scheduler_type"]).lower()
+        if scheduler_type != "cosine":
+            raise ValueError(
+                f"Unsupported scheduler_type '{scheduler_type}'. Only 'cosine' is allowed."
             )
-            
-            if warmup_epochs > 0:
-                # Add warmup scheduler
-                warmup_scheduler = LinearLR(
-                    self.optimizer,
-                    start_factor=1e-5,
-                    end_factor=1.0,
-                    total_iters=warmup_epochs,
-                )
-                
-                self.scheduler = SequentialLR(
-                    self.optimizer,
-                    schedulers=[warmup_scheduler, main_scheduler],
-                    milestones=[warmup_epochs],
-                )
-                logger.info(f"Cosine scheduler with {warmup_epochs} warmup epochs.")
-            else:
-                self.scheduler = main_scheduler
-                logger.info("Cosine scheduler without warmup.")
-        
-        elif scheduler_type == "reduce_on_plateau":
-            self.scheduler = ReduceLROnPlateau(
+
+        epochs = int(tp["epochs"])
+        warmup_epochs = int(tp["warmup_epochs"])
+        if warmup_epochs >= epochs:
+            raise ValueError("warmup_epochs must be less than total epochs.")
+
+        main_scheduler = CosineAnnealingLR(
+            self.optimizer,
+            T_max=epochs - warmup_epochs,
+            eta_min=float(tp["min_lr"]),
+        )
+
+        warmup_start_factor = float(tp["warmup_start_factor"])
+
+        if warmup_epochs > 0:
+            warmup_scheduler = LinearLR(
                 self.optimizer,
-                mode="min",
-                patience=tp.get("lr_patience", 10),
-                factor=tp.get("lr_factor", 0.5),
-                min_lr=tp.get("min_lr", 1e-8),
+                start_factor=warmup_start_factor,
+                end_factor=1.0,
+                total_iters=warmup_epochs,
             )
-            logger.info("Using ReduceLROnPlateau scheduler.")
-        
+            self.scheduler = SequentialLR(
+                self.optimizer,
+                schedulers=[warmup_scheduler, main_scheduler],
+                milestones=[warmup_epochs],
+            )
+            logger.info(f"Cosine scheduler with {warmup_epochs} warmup epochs.")
         else:
-            raise ValueError(f"Unsupported scheduler_type: {scheduler_type}")
+            self.scheduler = main_scheduler
+            logger.info("Cosine scheduler without warmup.")
     
     def _setup_training_params(self, tp: Dict) -> None:
         """Setup training parameters and loss function."""
@@ -425,25 +385,29 @@ class ModelTrainer:
         self.criterion = nn.MSELoss(reduction="none")
         
         # Gradient clipping
-        self.max_grad_norm = tp.get("gradient_clip_val", DEFAULT_GRAD_CLIP)
-        
-        # Gradient accumulation
-        self.accumulation_steps = tp.get(
-            "gradient_accumulation_steps", DEFAULT_GRADIENT_ACCUMULATION
-        )
+        self.max_grad_norm = float(tp["gradient_clip_val"])
         
         # Mixed precision training
-        self.use_amp = tp.get("use_amp", False) and self.device.type == "cuda"
-        if self.use_amp:
-            dev_name = torch.cuda.get_device_name(0)
-            self.amp_dtype = torch.bfloat16 if "A100" in dev_name else torch.float16
-        else:
-            self.amp_dtype = None
+        requested_amp = self.precision["use_amp"]
+        if requested_amp and self.device.type != "cuda":
+            raise RuntimeError("AMP is enabled in config but CUDA is not available.")
+        self.use_amp = requested_amp and self.device.type == "cuda"
+        self.amp_dtype = self.precision["amp_dtype"] if self.use_amp else None
         # GradScaler only for fp16; bf16 does not need scaling
         self.scaler = GradScaler(enabled=self.use_amp and self.amp_dtype == torch.float16)
 
         if self.use_amp:
             logger.info(f"AMP (Automatic Mixed Precision) enabled with dtype={self.amp_dtype}.")
+        logger.info(
+            "Precision: input=%s stats=%s model=%s forward=%s loss=%s optimizer_state=%s amp=%s",
+            self.precision["input_dtype_name"],
+            self.precision["stats_dtype_name"],
+            self.precision["model_dtype_name"],
+            self.precision["forward_dtype_name"],
+            self.precision["loss_dtype_name"],
+            self.precision["optimizer_state_dtype_name"],
+            self.precision["amp_dtype_name"],
+        )
 
     
     def _setup_logging(self) -> None:
@@ -459,16 +423,21 @@ class ModelTrainer:
         metadata = {
             "device": str(self.device),
             "use_amp": self.use_amp,
-            "effective_batch_size": (
-                    self.cfg["training_hyperparameters"].get("batch_size", DEFAULT_BATCH_SIZE)
-                    * self.accumulation_steps
-            ),
+            "input_dtype": self.precision["input_dtype_name"],
+            "stats_dtype": self.precision["stats_dtype_name"],
+            "model_dtype": self.precision["model_dtype_name"],
+            "forward_dtype": self.precision["forward_dtype_name"],
+            "loss_dtype": self.precision["loss_dtype_name"],
+            "optimizer_state_dtype": self.precision["optimizer_state_dtype_name"],
+            "amp_autocast_dtype": self.precision["amp_dtype_name"],
+            "effective_batch_size": int(self.cfg["training_hyperparameters"]["batch_size"]),
             "num_parameters": sum(p.numel() for p in self.model.parameters()),
             "num_trainable": sum(p.numel() for p in self.model.parameters() if p.requires_grad),
             "padding_convention": "True = padding position (PyTorch standard)",
         }
         # Use compact format for metadata
-        save_json(metadata, self.save_dir / "training_metadata.json", compact=True)
+        if not save_json(metadata, self.save_dir / "training_metadata.json", compact=True):
+            raise RuntimeError("Failed to save training_metadata.json.")
     
     def train(self) -> float:
         """
@@ -477,81 +446,49 @@ class ModelTrainer:
         Returns:
             Best validation loss achieved
         """
-        tp = self.cfg.get("training_hyperparameters", {})
-        epochs = tp.get("epochs", DEFAULT_EPOCHS)
-        patience = tp.get("early_stopping_patience", DEFAULT_EARLY_STOPPING_PATIENCE)
-        min_delta = tp.get("min_delta", DEFAULT_MIN_DELTA)
+        tp = self.cfg["training_hyperparameters"]
+        epochs = int(tp["epochs"])
+        patience = int(tp["early_stopping_patience"])
+        min_delta = float(tp["min_delta"])
         
         epochs_without_improvement = 0
         
         logger.info(f"Starting training for {epochs} epochs.")
         
         for epoch in range(1, epochs + 1):
-            self.current_epoch = epoch
             epoch_start = time.time()
             
             # Training epoch
             train_loss = self._run_epoch(self.train_loader, is_train=True)
-            if train_loss is None:
-                raise RuntimeError("Too many invalid batches in training.")
             
             # Validation epoch
-            val_loss = (
-                self._run_epoch(self.val_loader, is_train=False)
-                if self.has_val
-                else float("inf")
-            )
-            if val_loss is None:
-                val_loss = float("inf")
+            val_loss = self._run_epoch(self.val_loader, is_train=False)
             
-            if isinstance(self.scheduler, ReduceLROnPlateau):
-                if self.has_val and val_loss is not None and val_loss != float("inf"):
-                    metric = val_loss
-                else:
-                    metric = train_loss if train_loss is not None else float("inf")
-                
-                if metric != float("inf"):
-                    self.scheduler.step(metric)
-            else:
-                self.scheduler.step()
-            
-            # Report to Optuna if in hyperparameter search
-            if self.trial:
-                self.trial.report(val_loss, epoch)
-                if self.trial.should_prune():
-                    logger.info("Trial pruned by Optuna.")
-                    raise optuna.exceptions.TrialPruned()
+            self.scheduler.step()
             
             # Calculate improvement and log results
-            improvement = self.best_val_loss - val_loss if self.has_val else 0.0
+            improvement = self.best_val_loss - val_loss
             self._log_epoch_results(
                 epoch, train_loss, val_loss, time.time() - epoch_start, improvement
             )
             
             # Check for improvement and early stopping
-            if self.has_val:
-                if val_loss < self.best_val_loss - min_delta:
-                    # Improvement found
-                    self.best_val_loss = val_loss
-                    self.best_epoch = epoch
-                    epochs_without_improvement = 0
-                    self._save_best_model()
-                else:
-                    # No improvement
-                    epochs_without_improvement += 1
-                    
-                    if epochs_without_improvement >= patience:
-                        logger.info(
-                            f"Early stopping triggered after {patience} epochs "
-                            f"without improvement."
-                        )
-                        break
-        
-        # If no validation set, save final model
-        if not self.has_val:
-            self.best_val_loss = train_loss
-            self.best_epoch = epochs
-            self._save_best_model()
+            if val_loss < self.best_val_loss - min_delta:
+                # Improvement found
+                self.best_val_loss = val_loss
+                self.best_epoch = epoch
+                epochs_without_improvement = 0
+                self._save_best_model()
+            else:
+                # No improvement
+                epochs_without_improvement += 1
+
+                if epochs_without_improvement >= patience:
+                    logger.info(
+                        f"Early stopping triggered after {patience} epochs "
+                        f"without improvement."
+                    )
+                    break
         
         logger.info(
             f"Training complete. Best val_loss={self.best_val_loss:.4e} "
@@ -567,9 +504,8 @@ class ModelTrainer:
         Returns:
             Dictionary with test metrics
         """
-        if not self.test_loader:
-            logger.warning("No test dataset available. Skipping test.")
-            return {"test_loss": float("inf"), "best_epoch": self.best_epoch}
+        if len(self.test_loader) == 0:
+            raise RuntimeError("Test DataLoader is empty.")
         
         # Load best model checkpoint
         checkpoint_path = self.save_dir / "best_model.pt"
@@ -596,25 +532,24 @@ class ModelTrainer:
                     }
 
             self.model.load_state_dict(state_dict, strict=True)
-            #logger.info(f"Loaded best model from epoch {state['epoch']}")
+            logger.info(f"Loaded best model from epoch {state['epoch']}")
         
         # Run test evaluation
         test_loss = self._run_epoch(self.test_loader, is_train=False)
-        if test_loss is None:
-            test_loss = float("inf")
         
         # Save test metrics
         metrics = {
             "test_loss": test_loss,
             "best_epoch": self.best_epoch,
         }
-        save_json(metrics, self.save_dir / "test_metrics.json")
+        if not save_json(metrics, self.save_dir / "test_metrics.json"):
+            raise RuntimeError("Failed to save test_metrics.json.")
         
         logger.info(f"Test loss: {test_loss:.4e}")
         
         return metrics
     
-    def _run_epoch(self, loader: Optional[DataLoader], is_train: bool) -> Optional[float]:
+    def _run_epoch(self, loader: DataLoader, is_train: bool) -> float:
         """
         Run one epoch of training or validation.
 
@@ -623,113 +558,90 @@ class ModelTrainer:
             is_train: Whether this is a training epoch
             
         Returns:
-            Average loss for the epoch, or None if too many batches failed
+            Average loss for the epoch
         """
-        if not loader or len(loader) == 0:
+        if len(loader) == 0:
             mode = "training" if is_train else "validation"
-            logger.warning(f"DataLoader for {mode} is empty. Skipping epoch.")
-            return 0.0 if is_train else float("inf")
+            raise RuntimeError(f"DataLoader for {mode} is empty.")
         
         # Set model mode
         self.model.train(is_train)
         
-        # Track statistics
-        total_loss = 0.0
-        total_elements = 0
-        failed_batches = 0
-        
+        # Track statistics on-device to avoid per-batch host sync.
+        total_masked_loss = torch.zeros((), device=self.device, dtype=torch.float32)
+        total_elements = torch.zeros((), device=self.device, dtype=torch.int64)
+        zero_valid_batches = torch.zeros((), device=self.device, dtype=torch.int64)
         device_type = str(self.device.type)
-        
-        for batch_idx, batch in enumerate(loader):
-            # Data already on device if using DevicePrefetchLoader
-            inputs, masks, targets, target_masks = batch
-            
-            sequence = inputs["sequence"]
-            global_features = inputs.get("global_features")
-            sequence_mask = masks["sequence"]  # True = padding position
-            
-            # Forward pass with autocast
-            with torch.set_grad_enabled(is_train), autocast(
-                device_type=device_type, enabled=self.use_amp, dtype=(self.amp_dtype if self.use_amp else torch.float32)
-            ):
-                # Model forward
-                predictions = self.model(sequence, global_features, sequence_mask)
-                
-                # Compute unreduced loss
-                unreduced_loss = self.criterion(predictions, targets)
-                
-                # Target_masks has True for padding, but need True for valid
-                valid_mask = (~target_masks).unsqueeze(-1).expand_as(unreduced_loss)
-                
-                # Count valid elements
-                num_valid = valid_mask.sum()
-                
-                # Skip batch if all elements are padding
-                if num_valid.item() == 0:
-                    failed_batches += 1
-                    logger.debug(f"Batch {batch_idx} has no valid elements (all padding)")
-                    continue
-                
-                # Compute masked loss
-                # Only valid positions contribute to the loss
-                masked_loss = unreduced_loss * valid_mask.float()
-                loss = masked_loss.sum() / num_valid.float()
-            
-            if is_train:
-                # Backward pass
-                if self.use_amp:
-                    self.scaler.scale(loss).backward()
+
+        grad_context = torch.enable_grad() if is_train else torch.inference_mode()
+
+        with grad_context:
+            for batch in loader:
+                # Data already on device and casted when using CUDA prefetch loader.
+                inputs, masks, targets, target_masks = batch
+
+                if self._using_prefetch_loader:
+                    sequence = inputs["sequence"]
+                    global_features = inputs.get("global_features")
+                    sequence_mask = masks["sequence"]
                 else:
-                    loss.backward()
-                
-                # Gradient accumulation and optimization step
-                if (batch_idx + 1) % self.accumulation_steps == 0 or (batch_idx + 1) == len(loader):
-                    # Unscale gradients if using AMP
+                    sequence = inputs["sequence"].to(
+                        device=self.device, dtype=self.forward_dtype
+                    )
+                    global_features = inputs.get("global_features")
+                    if global_features is not None:
+                        global_features = global_features.to(
+                            device=self.device, dtype=self.forward_dtype
+                        )
+                    sequence_mask = masks["sequence"].to(device=self.device)
+                    targets = targets.to(device=self.device, dtype=self.loss_dtype)
+                    target_masks = target_masks.to(device=self.device)
+
+                # Forward pass with autocast
+                with autocast(device_type=device_type, enabled=self.use_amp, dtype=self.amp_dtype):
+                    predictions = self.model(sequence, global_features, sequence_mask)
+                    if predictions.dtype != self.loss_dtype:
+                        predictions = predictions.to(dtype=self.loss_dtype)
+
+                    unreduced_loss = self.criterion(predictions, targets)
+                    valid_steps = ~target_masks
+                    valid_step_mask = valid_steps.unsqueeze(-1)
+                    masked_loss_sum = unreduced_loss.masked_fill(~valid_step_mask, 0).sum()
+                    num_valid_elements = valid_steps.sum(dtype=torch.int64) * unreduced_loss.shape[-1]
+                    zero_valid_batches += (num_valid_elements == 0).to(dtype=torch.int64)
+                    loss = masked_loss_sum / num_valid_elements.clamp_min(1).to(dtype=self.loss_dtype)
+
+                if is_train:
                     if self.use_amp:
+                        self.scaler.scale(loss).backward()
                         self.scaler.unscale_(self.optimizer)
-                    
-                    # Gradient clipping
+                    else:
+                        loss.backward()
+
                     if self.max_grad_norm > 0:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                    
-                    # Optimizer step
+
                     if self.use_amp:
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
                     else:
                         self.optimizer.step()
-                    
-                    # Zero gradients
                     self.optimizer.zero_grad(set_to_none=True)
-            
-            # Accumulate statistics
-            total_loss += loss.item() * num_valid.item()
-            total_elements += num_valid.item()
-            
-            # Step the profiler after each batch (moved from end of epoch)
-            if self.profiler is not None:
-                self.profiler.step()
-        
-        # Check failure rate
-        if len(loader) > 0 and failed_batches / len(loader) > self.max_batch_failure_rate:
-            logger.critical(
-                f"Too many failed batches ({failed_batches}/{len(loader)}). "
-                f"Aborting epoch."
+
+                total_masked_loss += masked_loss_sum.detach().to(dtype=torch.float32)
+                total_elements += num_valid_elements.detach()
+
+        zero_valid_count = int(zero_valid_batches.item())
+        if zero_valid_count > 0:
+            raise RuntimeError(
+                f"Encountered {zero_valid_count} all-padding batches."
             )
-            return None
-        
-        if total_elements == 0:
-            logger.error("No valid elements were processed in this epoch.")
-            return None
-        
-        # Log padding statistics
-        if failed_batches > 0:
-            logger.debug(
-                f"Epoch complete. {failed_batches} batches were all padding. "
-                f"Processed {total_elements} valid elements."
-            )
-                
-        return total_loss / total_elements
+
+        if int(total_elements.item()) == 0:
+            raise RuntimeError("No valid (non-padding) elements were processed in this epoch.")
+
+        avg_loss = total_masked_loss / total_elements.to(dtype=torch.float32)
+        return float(avg_loss.item())
     
     def _log_epoch_results(
         self,
@@ -764,7 +676,7 @@ class ModelTrainer:
             )
     
     def _save_best_model(self) -> None:
-        """Save the best model checkpoint and export it."""
+        """Save the best model checkpoint."""
         # Prepare checkpoint
         checkpoint = {
             "state_dict": self.model.state_dict(),
@@ -782,52 +694,5 @@ class ModelTrainer:
         # Save checkpoint
         checkpoint_path = self.save_dir / "best_model.pt"
         torch.save(checkpoint, checkpoint_path)
-        self._export_model()
     
-    def _export_model(self) -> None:
-        """Export model using torch.export."""
-        try:
-            # Get sample input from validation loader
-            sample = next(iter(self.val_loader)) if self.val_loader else None
-            if sample is None:
-                logger.warning("No sample available for export.")
-                return
-            
-            # Create fresh un-compiled model for export
-            model_for_export = create_prediction_model(self.cfg, device=self.device, compile_model=False)
-            
-            # Load trained weights
-            if hasattr(self.model, '_orig_mod'):
-                state_dict = self.model._orig_mod.state_dict()
-            else:
-                state_dict = self.model.state_dict()
-            
-            model_for_export.load_state_dict(state_dict)
-            
-            # Prepare example input
-            inputs, masks, _, _ = sample
-            example = {
-                "sequence": inputs["sequence"][:1],
-                "sequence_mask": masks["sequence"][:1],
-            }
-            if "global_features" in inputs:
-                example["global_features"] = inputs["global_features"][:1]
-            
-            # Export model
-            export_path = self.save_dir / f"best_model_epoch_{self.best_epoch}"
-            export_model(model_for_export, example, export_path, self.cfg)
-            
-        except Exception as e:
-            logger.error(f"Model export failed: {e}", exc_info=True)
-        finally:
-            if 'model_for_export' in locals():
-                del model_for_export
-            
-            # Force garbage collection and clear GPU cache
-            import gc
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-
 __all__ = ["ModelTrainer", "DevicePrefetchLoader"]

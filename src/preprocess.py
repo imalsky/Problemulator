@@ -22,28 +22,33 @@ from tqdm import tqdm
 
 from normalizer import DataNormalizer
 from utils import (
-    PADDING_VALUE,
-    compute_data_hash_with_stats,
     ensure_dirs,
+    get_precision_config,
     save_json,
 )
 
 logger = logging.getLogger(__name__)
 
-_TRUNCATION_WARNED: set[str] = set()  # warn once per variable for truncation
-
-# Processing constants
-HDF5_READ_CHUNK_SIZE = 8192
-_MAX_BLOCK_BYTES = 512 * 1024 * 1024  # 512 MiB
-_MAX_SPAN_MULTIPLIER = 16             # span <= multiplier * n_indices
+TORCH_TO_NUMPY_DTYPE = {
+    torch.float16: np.float16,
+    torch.float32: np.float32,
+    torch.float64: np.float64,
+}
 
 
 def _load_and_restore_chunk(
     hf_file: h5py.File,
     variables: List[str],
     indices: np.ndarray,
+    *,
+    expected_ndim: int,
+    max_block_bytes: int,
+    max_span_multiplier: int,
+    pad_comparison_epsilon: float,
     max_seq_len: Optional[int] = None,
-) -> Optional[Dict[str, np.ndarray]]:
+    padding_value: Optional[float] = None,
+    strictly_positive_vars: Optional[set[str]] = None,
+) -> Dict[str, np.ndarray]:
     """
     Load a chunk of data for specified variables and indices.
 
@@ -54,10 +59,15 @@ def _load_and_restore_chunk(
         hf_file: Open HDF5 file handle
         variables: List of variable names to load
         indices: Array of indices to load
-        max_seq_len: Optional maximum sequence length for truncation (2D arrays only)
+        expected_ndim: Required dataset rank for all variables in this call
+        max_block_bytes: Maximum contiguous read size for guarded block reads
+        max_span_multiplier: Maximum read-span multiplier for guarded block reads
+        pad_comparison_epsilon: Tolerance for padding sentinel detection
+        max_seq_len: Optional maximum sequence length (2D arrays only)
+        padding_value: Optional padding sentinel to reject in raw, non-padding data
 
     Returns:
-        Dictionary of variable_name -> data array, or None if error
+        Dictionary of variable_name -> data array
     """
     if indices.size == 0:
         return {}
@@ -74,10 +84,13 @@ def _load_and_restore_chunk(
 
     for var in variables:
         if var not in hf_file:
-            logger.error(f"Critical error: Variable '{var}' not found in HDF5 file.")
-            return None
+            raise KeyError(f"Critical error: Variable '{var}' not found in HDF5 file.")
 
         ds = hf_file[var]
+        if ds.ndim != expected_ndim:
+            raise ValueError(
+                f"Variable '{var}' expected rank {expected_ndim}, got rank {ds.ndim}."
+            )
 
         # Guarded contiguous block read: fast when indices are reasonably dense
         start = int(sorted_indices[0])
@@ -87,7 +100,10 @@ def _load_and_restore_chunk(
         row_elems = int(np.prod(ds.shape[1:])) if ds.ndim > 1 else 1
         est_bytes = span * row_elems * ds.dtype.itemsize
 
-        if span <= _MAX_SPAN_MULTIPLIER * int(sorted_indices.size) and est_bytes <= _MAX_BLOCK_BYTES:
+        if (
+            span <= max_span_multiplier * int(sorted_indices.size)
+            and est_bytes <= max_block_bytes
+        ):
             block = ds[start:end]
             data_sorted = block[sorted_indices - start]
         else:
@@ -96,16 +112,29 @@ def _load_and_restore_chunk(
         # Restore original order
         data_orig_order = data_sorted[inverse_sorter]
 
-        # Optional truncation (sequence variables)
-        if max_seq_len is not None and data_orig_order.ndim == 2:
+        # Validate finiteness and sentinel safety on raw values.
+        if not np.isfinite(data_orig_order).all():
+            raise ValueError(f"Non-finite values detected in variable '{var}'.")
+        if (
+            padding_value is not None
+            and np.any(np.abs(data_orig_order - padding_value) <= pad_comparison_epsilon)
+        ):
+            raise ValueError(
+                f"Padding sentinel {padding_value} appears in raw variable '{var}'."
+            )
+        if strictly_positive_vars and var in strictly_positive_vars:
+            if np.any(data_orig_order <= 0):
+                raise ValueError(
+                    f"Variable '{var}' must be strictly positive but contains values <= 0."
+                )
+
+        # Sequence-length policy: overflow is an error.
+        if max_seq_len is not None and expected_ndim == 2:
             if data_orig_order.shape[1] > max_seq_len:
-                if var not in _TRUNCATION_WARNED:
-                    logger.warning(
-                        f"Truncating sequence from {data_orig_order.shape[1]} to {max_seq_len} "
-                        f"for variable '{var}'"
-                    )
-                    _TRUNCATION_WARNED.add(var)
-                data_orig_order = data_orig_order[:, :max_seq_len]
+                raise ValueError(
+                    f"Sequence length overflow for '{var}': "
+                    f"{data_orig_order.shape[1]} > max_sequence_length={max_seq_len}."
+                )
 
         data_chunk[var] = data_orig_order
 
@@ -133,72 +162,39 @@ def _save_preprocessing_summary(
     config: Dict[str, Any],
     splits: Dict[str, List[Tuple[str, int]]],
     norm_metadata: Dict[str, Any],
-    data_hash: str,
 ) -> None:
     """Save a human-readable summary of preprocessing results."""
     summary_path = output_dir / "preprocessing_summary.txt"
+    data_spec = config["data_specification"]
+    model_hp = config["model_hyperparameters"]
+    misc = config["miscellaneous_settings"]
+    methods = norm_metadata["normalization_methods"]
+    stats = norm_metadata["per_key_stats"]
 
-    # Best-effort: summary should never crash preprocessing
-    try:
-        data_spec = config.get("data_specification", {})
-        model_hp = config.get("model_hyperparameters", {})
-        misc = config.get("miscellaneous_settings", {})
+    with open(summary_path, "w") as f:
+        f.write("=== Preprocessing Summary ===\n\n")
+        f.write(f"Date: {datetime.datetime.now().isoformat()}\n")
+        f.write("Data Hash: disabled\n\n")
 
-        with open(summary_path, "w") as f:
-            f.write("=== Preprocessing Summary ===\n\n")
-            f.write(f"Date: {datetime.datetime.now().isoformat()}\n")
-            f.write(f"Data Hash: {data_hash}\n\n")
+        f.write("=== Configuration ===\n")
+        f.write(f"Processed Data Directory: {str(output_dir)}\n")
+        f.write(f"Max Sequence Length: {model_hp['max_sequence_length']}\n")
+        f.write(f"Shard Size: {misc['shard_size']}\n")
+        f.write(f"Padding Value: {data_spec['padding_value']}\n\n")
 
-            f.write("=== Configuration ===\n")
-            f.write(f"Processed Data Directory: {str(output_dir)}\n")
-            f.write(f"Max Sequence Length: {model_hp.get('max_sequence_length')}\n")
-            f.write(f"Shard Size: {misc.get('shard_size')}\n")
-            f.write(f"Padding Value: {data_spec.get('padding_value', PADDING_VALUE)}\n\n")
+        f.write("=== Data Splits ===\n")
+        for split_name in ("train", "validation", "test"):
+            f.write(f"{split_name}: {len(splits[split_name])} profiles\n")
 
-            f.write("=== Data Splits ===\n")
-            for split_name in ("train", "validation", "test"):
-                if split_name in splits:
-                    f.write(f"{split_name}: {len(splits[split_name])} profiles\n")
+        f.write("\n=== Normalization ===\n")
+        for var, method in methods.items():
+            f.write(f"{var}: {method}\n")
 
-            f.write("\n=== Normalization ===\n")
-            methods = norm_metadata.get("normalization_methods", {})
-            for var, method in methods.items():
-                f.write(f"{var}: {method}\n")
-
-            f.write("\n=== Normalization Statistics (per_key_stats) ===\n")
-            stats = norm_metadata.get("per_key_stats", {})
-            for var, stat_dict in stats.items():
-                f.write(f"{var}:\n")
-                for k, v in stat_dict.items():
-                    f.write(f"  {k}: {v}\n")
-    except Exception as e:
-        logger.debug(f"Failed to write preprocessing summary: {e}")
-
-
-def _normalize_channel_preserve_padding(
-    x: torch.Tensor,
-    *,
-    method: str,
-    stats: Dict[str, Any],
-    padding_value: float,
-) -> torch.Tensor:
-    """
-    Normalize a tensor while preserving padding_value exactly at padding positions.
-    """
-    if method in ("none", "bool") or not stats:
-        return x
-
-    # Padding mask computed on the unnormalized values
-    pad_mask = torch.isfinite(x) & (torch.abs(x - padding_value) <= 1e-6)
-
-    y = DataNormalizer.normalize_tensor(x, method, stats)
-
-    if pad_mask.any():
-        # avoid in-place modification side effects if y is a view
-        y = y.clone()
-        y[pad_mask] = padding_value
-
-    return y
+        f.write("\n=== Normalization Statistics (per_key_stats) ===\n")
+        for var, stat_dict in stats.items():
+            f.write(f"{var}:\n")
+            for k, v in stat_dict.items():
+                f.write(f"  {k}: {v}\n")
 
 
 def preprocess_data(
@@ -218,80 +214,127 @@ def preprocess_data(
         processed_dir: Output directory for processed shards
 
     Returns:
-        True if preprocessing succeeded, False otherwise
+        True if preprocessing succeeded
     """
     preprocessing_start_time = time.time()
 
     # Validate splits
     required_split_keys = {"train", "validation", "test"}
     if not required_split_keys.issubset(splits.keys()):
-        logger.error(f"Splits dict must contain keys: {sorted(required_split_keys)}")
-        return False
+        raise ValueError(f"Splits dict must contain keys: {sorted(required_split_keys)}")
 
-    data_spec = config.get("data_specification", {})
-    if not isinstance(data_spec, dict):
-        logger.error("Config missing 'data_specification' section.")
-        return False
+    data_spec = config["data_specification"]
+    input_vars = list(data_spec["input_variables"])
+    target_vars = list(data_spec["target_variables"])
+    global_vars = list(data_spec["global_variables"])
+    strictly_positive_vars = set(data_spec["strictly_positive_variables"])
+    max_seq_len = int(config["model_hyperparameters"]["max_sequence_length"])
 
-    input_vars = list(data_spec.get("input_variables", []))
-    target_vars = list(data_spec.get("target_variables", []))
-    global_vars = list(data_spec.get("global_variables", []))
+    misc = config["miscellaneous_settings"]
+    shard_size = int(misc["shard_size"])
+    hdf5_read_chunk_size = int(misc["hdf5_read_chunk_size"])
 
-    if not input_vars or not target_vars:
-        logger.error("Config must specify non-empty input_variables and target_variables.")
-        return False
+    if hdf5_read_chunk_size >= shard_size:
+        raise ValueError(
+            f"hdf5_read_chunk_size ({hdf5_read_chunk_size}) must be less than "
+            f"shard_size ({shard_size}) to prevent shard buffer overflow."
+        )
 
-    model_hp = config.get("model_hyperparameters", {})
-    if "max_sequence_length" not in model_hp:
-        logger.error("Config missing model_hyperparameters.max_sequence_length.")
-        return False
-    max_seq_len = int(model_hp["max_sequence_length"])
-
-    misc = config.get("miscellaneous_settings", {})
-    shard_size = int(misc.get("shard_size", 8192))
-    hdf5_read_chunk_size = int(misc.get("hdf5_read_chunk_size", HDF5_READ_CHUNK_SIZE))
-
-    padding_value = float(data_spec.get("padding_value", PADDING_VALUE))
+    padding_value = float(data_spec["padding_value"])
+    normalization_cfg = config["normalization"]
+    normalized_value_clamp = float(normalization_cfg["normalized_value_clamp"])
+    pad_comparison_epsilon = float(normalization_cfg["padding_comparison_epsilon"])
+    stats_max_block_bytes = int(normalization_cfg["stats_max_block_bytes"])
+    stats_max_span_multiplier = int(normalization_cfg["stats_max_span_multiplier"])
+    precision = get_precision_config(config)
+    processed_torch_dtype = precision["input_dtype"]
+    if processed_torch_dtype not in TORCH_TO_NUMPY_DTYPE:
+        raise ValueError(
+            "Processed shard dtype must map to a NumPy dtype. "
+            f"Unsupported precision.input_dtype={precision['input_dtype_name']!r}. "
+            "Use float16/float32/float64."
+        )
+    processed_numpy_dtype = TORCH_TO_NUMPY_DTYPE[processed_torch_dtype]
 
     # Ensure output dirs exist
-    ensure_dirs(processed_dir)
-
-    # Compute hash and short-circuit if unchanged
-    try:
-        current_hash = compute_data_hash_with_stats(config, raw_hdf5_paths)
-    except Exception as e:
-        logger.exception(f"Failed to compute data hash: {e}")
-        return False
-
-    hash_path = processed_dir / ".preprocess_hash"
-    if hash_path.exists():
-        old_hash = hash_path.read_text().strip()
-        if old_hash == current_hash:
-            logger.info("Preprocessing already up to date (hash match). Skipping.")
-            return True
+    if not ensure_dirs(processed_dir):
+        raise RuntimeError(f"Failed to create processed data directory: {processed_dir}")
 
     # Map file stems to paths
     file_map = {p.stem: p for p in raw_hdf5_paths if p.is_file()}
     if not file_map:
-        logger.error("No valid raw HDF5 paths provided.")
-        return False
+        raise RuntimeError("No valid raw HDF5 paths provided.")
+
+    # Validate split references and index bounds up front.
+    required_vars = list(dict.fromkeys(input_vars + target_vars + global_vars))
+    profile_vars = list(dict.fromkeys(input_vars + target_vars))
+    file_num_rows: Dict[str, int] = {}
+    for stem, path in file_map.items():
+        with h5py.File(path, "r", swmr=True, libver="latest") as hf:
+            missing_vars = [v for v in required_vars if v not in hf]
+            if missing_vars:
+                raise ValueError(f"Missing required variables in {path.name}: {missing_vars}")
+
+            profile_shapes = {var: tuple(hf[var].shape) for var in profile_vars}
+            if any(len(shape) != 2 for shape in profile_shapes.values()):
+                bad = {
+                    var: shape for var, shape in profile_shapes.items() if len(shape) != 2
+                }
+                raise ValueError(
+                    "Profile variables must have shape [N, L]. "
+                    f"Invalid shapes in {path.name}: {bad}"
+                )
+            unique_profile_shapes = sorted(set(profile_shapes.values()))
+            if len(unique_profile_shapes) != 1:
+                raise ValueError(
+                    "All profile variables must share identical [N, L] shape. "
+                    f"Found in {path.name}: {profile_shapes}"
+                )
+            n_profiles, seq_len = unique_profile_shapes[0]
+            if seq_len <= 0:
+                raise ValueError(f"Invalid sequence length L={seq_len} in {path.name}.")
+            if seq_len > max_seq_len:
+                raise ValueError(
+                    f"Sequence length overflow in {path.name}: {seq_len} > "
+                    f"max_sequence_length={max_seq_len}."
+                )
+
+            for var in global_vars:
+                glb_shape = tuple(hf[var].shape)
+                if len(glb_shape) != 1:
+                    raise ValueError(
+                        f"Global variable '{var}' must have shape [N], got {glb_shape} in {path.name}."
+                    )
+                if glb_shape[0] != n_profiles:
+                    raise ValueError(
+                        f"Global variable '{var}' leading dimension mismatch in {path.name}: "
+                        f"{glb_shape[0]} != {n_profiles}."
+                    )
+
+            file_num_rows[stem] = int(n_profiles)
+
+    for split_key in ("train", "validation", "test"):
+        for stem, idx in splits[split_key]:
+            if stem not in file_map:
+                raise KeyError(f"Unknown file stem '{stem}' in split '{split_key}'.")
+            if not isinstance(idx, int) or idx < 0 or idx >= file_num_rows[stem]:
+                raise ValueError(
+                    f"Out-of-range index in split '{split_key}': ({stem}, {idx}), "
+                    f"valid range is [0, {file_num_rows[stem]})."
+                )
 
     # Compute normalization stats from training split
     normalizer = DataNormalizer(config_data=config)
 
     logger.info("Calculating normalization statistics from training split...")
-    try:
-        norm_metadata = normalizer.calculate_stats(raw_hdf5_paths, splits["train"])
-    except Exception as e:
-        logger.exception(f"Failed to calculate normalization stats: {e}")
-        return False
+    norm_metadata = normalizer.calculate_stats(raw_hdf5_paths, splits["train"])
 
     # Save normalization metadata
     if not save_json(norm_metadata, processed_dir / "normalization_metadata.json"):
-        logger.warning("Failed to save normalization_metadata.json")
+        raise RuntimeError("Failed to save normalization_metadata.json.")
 
-    norm_methods: Dict[str, str] = norm_metadata.get("normalization_methods", {})
-    norm_stats: Dict[str, Dict[str, Any]] = norm_metadata.get("per_key_stats", {})
+    norm_methods: Dict[str, str] = norm_metadata["normalization_methods"]
+    norm_stats: Dict[str, Dict[str, Any]] = norm_metadata["per_key_stats"]
 
     # Create split directories (validation -> 'val' on disk)
     split_dir_map = {
@@ -302,11 +345,11 @@ def preprocess_data(
 
     for split_key, split_dirname in split_dir_map.items():
         split_dir = processed_dir / split_dirname
-        ensure_dirs(split_dir)
-        ensure_dirs(split_dir / "sequence_inputs")
-        ensure_dirs(split_dir / "targets")
+        if not ensure_dirs(split_dir, split_dir / "sequence_inputs", split_dir / "targets"):
+            raise RuntimeError(f"Failed to create split directories for '{split_key}'.")
         if global_vars:
-            ensure_dirs(split_dir / "globals")
+            if not ensure_dirs(split_dir / "globals"):
+                raise RuntimeError(f"Failed to create globals directory for '{split_key}'.")
 
     # Process each split and write shards
     for split_key, split_dirname in split_dir_map.items():
@@ -328,7 +371,8 @@ def preprocess_data(
             "sequence_length": max_seq_len,
             "has_globals": bool(global_vars),
         }
-        save_json(split_metadata, split_dir / "metadata.json")
+        if not save_json(split_metadata, split_dir / "metadata.json"):
+            raise RuntimeError(f"Failed to save split metadata for '{split_key}'.")
 
         # Group indices by file stem to reduce file open churn
         grouped_indices: Dict[str, List[int]] = {}
@@ -342,21 +386,33 @@ def preprocess_data(
         n_tgt = len(target_vars)
         n_glb = len(global_vars)
 
-        seq_shard = np.full((shard_size, max_seq_len, n_in), padding_value, dtype=np.float32)
-        tgt_shard = np.full((shard_size, max_seq_len, n_tgt), padding_value, dtype=np.float32)
-        glb_shard = np.zeros((shard_size, n_glb), dtype=np.float32) if global_vars else None
+        seq_shard = np.full(
+            (shard_size, max_seq_len, n_in),
+            padding_value,
+            dtype=processed_numpy_dtype,
+        )
+        tgt_shard = np.full(
+            (shard_size, max_seq_len, n_tgt),
+            padding_value,
+            dtype=processed_numpy_dtype,
+        )
+        glb_shard = (
+            np.zeros((shard_size, n_glb), dtype=processed_numpy_dtype)
+            if global_vars else None
+        )
 
         write_pos = 0
         shard_idx = 0
 
         logger.info(f"Processing split '{split_key}' -> '{split_dirname}' ({total_samples} profiles)...")
 
+        # Precompute static variable lists outside the inner loop.
+        seq_vars = list(dict.fromkeys(input_vars + target_vars))
+
         with tqdm(total=total_samples, desc=f"Processing {split_dirname}") as pbar:
             for file_stem, indices in grouped_indices.items():
                 if file_stem not in file_map:
-                    logger.warning(f"Skipping unknown file stem '{file_stem}'.")
-                    pbar.update(len(indices))
-                    continue
+                    raise KeyError(f"Unknown file stem '{file_stem}' encountered during preprocessing.")
 
                 with h5py.File(file_map[file_stem], "r", swmr=True, libver="latest") as hf_raw:
                     idx_arr = np.asarray(indices, dtype=np.int64)
@@ -367,16 +423,33 @@ def preprocess_data(
                             continue
 
                         # Load sequence-like variables (inputs + targets) in one pass
-                        seq_vars = list(dict.fromkeys(input_vars + target_vars))
-                        seq_data = _load_and_restore_chunk(hf_raw, seq_vars, chunk_idx, max_seq_len=max_seq_len)
-                        if seq_data is None:
-                            return False
+                        seq_data = _load_and_restore_chunk(
+                            hf_raw,
+                            seq_vars,
+                            chunk_idx,
+                            expected_ndim=2,
+                            max_block_bytes=stats_max_block_bytes,
+                            max_span_multiplier=stats_max_span_multiplier,
+                            pad_comparison_epsilon=pad_comparison_epsilon,
+                            max_seq_len=max_seq_len,
+                            padding_value=padding_value,
+                            strictly_positive_vars=strictly_positive_vars,
+                        )
 
                         # Load globals separately (typically 1D)
                         if global_vars:
-                            global_data = _load_and_restore_chunk(hf_raw, global_vars, chunk_idx, max_seq_len=None)
-                            if global_data is None:
-                                return False
+                            global_data = _load_and_restore_chunk(
+                                hf_raw,
+                                global_vars,
+                                chunk_idx,
+                                expected_ndim=1,
+                                max_block_bytes=stats_max_block_bytes,
+                                max_span_multiplier=stats_max_span_multiplier,
+                                pad_comparison_epsilon=pad_comparison_epsilon,
+                                max_seq_len=None,
+                                padding_value=padding_value,
+                                strictly_positive_vars=strictly_positive_vars,
+                            )
                         else:
                             global_data = {}
 
@@ -390,9 +463,13 @@ def preprocess_data(
                             else None
                         )
 
-                        seq_in = torch.from_numpy(seq_in_np).float()
-                        tgt = torch.from_numpy(tgt_np).float()
-                        glb = torch.from_numpy(glb_np).float() if glb_np is not None else None
+                        seq_in = torch.as_tensor(seq_in_np, dtype=processed_torch_dtype)
+                        tgt = torch.as_tensor(tgt_np, dtype=processed_torch_dtype)
+                        glb = (
+                            torch.as_tensor(glb_np, dtype=processed_torch_dtype)
+                            if glb_np is not None
+                            else None
+                        )
 
                         # Ensure fixed length by right-padding with padding_value (not zeros)
                         cur_len = int(seq_in.shape[1])
@@ -401,37 +478,72 @@ def preprocess_data(
                             seq_in = torch.nn.functional.pad(seq_in, (0, 0, 0, pad_width), value=padding_value)
                             tgt = torch.nn.functional.pad(tgt, (0, 0, 0, pad_width), value=padding_value)
 
-                        # Normalize per-channel, preserving padding values
+                        # Compute padding mask once for all sequence channels.
+                        # Per spec §4.2, padding is per-timestep (all features padded together),
+                        # so one channel suffices for the mask.
+                        pad_mask = torch.isfinite(seq_in[:, :, 0]) & (
+                            torch.abs(seq_in[:, :, 0] - padding_value) <= pad_comparison_epsilon
+                        )
+                        valid_mask = ~pad_mask
+                        has_valid = bool(valid_mask.any())
+                        has_padding = bool(pad_mask.any())
+
+                        # Normalize per-channel in-place, reusing the shared mask.
                         for j, var in enumerate(input_vars):
-                            method = str(norm_methods.get(var, "none"))
-                            stats = norm_stats.get(var, {})
-                            seq_in[:, :, j] = _normalize_channel_preserve_padding(
-                                seq_in[:, :, j], method=method, stats=stats, padding_value=padding_value
-                            )
+                            if var not in norm_methods or var not in norm_stats:
+                                raise KeyError(f"Missing normalization metadata for input variable '{var}'.")
+                            method = str(norm_methods[var])
+                            stats = norm_stats[var]
+                            if method not in ("none", "bool") and stats:
+                                channel = seq_in[:, :, j]
+                                if has_valid:
+                                    channel[valid_mask] = DataNormalizer.normalize_tensor(
+                                        channel[valid_mask], method, stats,
+                                        normalized_value_clamp=normalized_value_clamp,
+                                    )
+                                if has_padding:
+                                    channel[pad_mask] = padding_value
 
                         for j, var in enumerate(target_vars):
-                            method = str(norm_methods.get(var, "none"))
-                            stats = norm_stats.get(var, {})
-                            tgt[:, :, j] = _normalize_channel_preserve_padding(
-                                tgt[:, :, j], method=method, stats=stats, padding_value=padding_value
-                            )
+                            if var not in norm_methods or var not in norm_stats:
+                                raise KeyError(f"Missing normalization metadata for target variable '{var}'.")
+                            method = str(norm_methods[var])
+                            stats = norm_stats[var]
+                            if method not in ("none", "bool") and stats:
+                                channel = tgt[:, :, j]
+                                if has_valid:
+                                    channel[valid_mask] = DataNormalizer.normalize_tensor(
+                                        channel[valid_mask], method, stats,
+                                        normalized_value_clamp=normalized_value_clamp,
+                                    )
+                                if has_padding:
+                                    channel[pad_mask] = padding_value
 
                         if global_vars and glb is not None:
                             for j, var in enumerate(global_vars):
-                                method = str(norm_methods.get(var, "none"))
-                                stats = norm_stats.get(var, {})
-                                glb[:, j] = _normalize_channel_preserve_padding(
-                                    glb[:, j], method=method, stats=stats, padding_value=padding_value
-                                )
+                                if var not in norm_methods or var not in norm_stats:
+                                    raise KeyError(f"Missing normalization metadata for global variable '{var}'.")
+                                method = str(norm_methods[var])
+                                stats = norm_stats[var]
+                                if method not in ("none", "bool") and stats:
+                                    # Globals are per-profile scalars (no padding), normalize directly.
+                                    glb[:, j] = DataNormalizer.normalize_tensor(
+                                        glb[:, j], method, stats,
+                                        normalized_value_clamp=normalized_value_clamp,
+                                    )
 
                         # Write into shard buffers
                         batch_n = int(seq_in.shape[0])
                         start_pos = write_pos
                         end_pos = write_pos + batch_n
 
-                        seq_in_np2 = seq_in.numpy().astype(np.float32, copy=False)
-                        tgt_np2 = tgt.numpy().astype(np.float32, copy=False)
-                        glb_np2 = glb.numpy().astype(np.float32, copy=False) if glb is not None else None
+                        seq_in_np2 = seq_in.numpy().astype(processed_numpy_dtype, copy=False)
+                        tgt_np2 = tgt.numpy().astype(processed_numpy_dtype, copy=False)
+                        glb_np2 = (
+                            glb.numpy().astype(processed_numpy_dtype, copy=False)
+                            if glb is not None
+                            else None
+                        )
 
                         if end_pos <= shard_size:
                             seq_shard[start_pos:end_pos] = seq_in_np2
@@ -483,8 +595,7 @@ def preprocess_data(
             )
 
     # Save summary and hash
-    _save_preprocessing_summary(processed_dir, config, splits, norm_metadata, current_hash)
-    hash_path.write_text(current_hash)
+    _save_preprocessing_summary(processed_dir, config, splits, norm_metadata)
 
     total_time = time.time() - preprocessing_start_time
     logger.info(f"Preprocessing completed successfully in {total_time:.2f}s.")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PADDING CONVENTION:
-- Padding value: -9999.0 (defined in config)
+- Padding value: defined in config (data_specification.padding_value)
 - Mask convention: True = padding position, False = valid position
 - This follows PyTorch's convention for key_padding_mask
 - All features at a timestep must equal padding_value for it to be considered padding
@@ -18,27 +18,24 @@ from __future__ import annotations
 import json
 import logging
 import psutil
+from collections import OrderedDict
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from utils import DTYPE, PADDING_VALUE
-
 logger = logging.getLogger(__name__)
-
-FLOAT_COMPARISON = 1e-6
 
 class AtmosphericDataset(Dataset):
     """
     Dataset for loading preprocessed atmospheric profile data.
     
-    Automatically chooses between RAM loading and disk caching based on
-    available memory. Uses memory mapping for large files to reduce I/O.
+    Uses explicit config policy for RAM vs disk loading.
+    Uses memory mapping for large files to reduce I/O.
     
     Padding Convention:
     - Sequences are right-padded (padding at the end)
@@ -49,41 +46,38 @@ class AtmosphericDataset(Dataset):
         self,
         dir_path: Path,
         config: Dict[str, Any],
-        indices: List[int],
-        force_disk_loading: bool = False,
+        indices: Optional[Sequence[int]],
     ) -> None:
         """
         Initialize dataset with automatic memory management.
-        
+
         Args:
             dir_path: Directory containing processed data shards
             config: Configuration dictionary
-            indices: List of sample indices to use (0-based within split)
-            force_disk_loading: If True, force disk-based loading
+            indices: Optional list of sample indices to use (0-based within split).
+                     If None, use all samples in split order.
         """
         super().__init__()
-        
+
         if not dir_path.is_dir():
             raise RuntimeError(f"Directory not found: {dir_path}")
-        
+
         self.dir_path = dir_path
         self.config = config
 
-        self.indices = list(indices)
-        self.force_disk_loading = force_disk_loading
+        self.indices = list(indices) if indices is not None else None
+        misc_cfg = self.config["miscellaneous_settings"]
+        self.loading_mode = str(misc_cfg["dataset_loading_mode"]).lower()
+        self.max_cached_shards = int(misc_cfg["dataset_max_cached_shards"])
+        self.large_shard_mmap_bytes = int(misc_cfg["dataset_large_shard_mmap_bytes"])
+        self.ram_safety_fraction = float(misc_cfg["dataset_ram_safety_fraction"])
+        self.copy_mmap_slices = bool(misc_cfg["dataset_copy_mmap_slices"])
         
         # Extract data specification
         data_spec = self.config["data_specification"]
         self.input_variables = data_spec["input_variables"]
         self.target_variables = data_spec["target_variables"]
-        self.global_variables = data_spec.get("global_variables", [])
-        
-        # Padding configuration for safe comparison
-        self.padding_value = float(data_spec.get("padding_value", PADDING_VALUE))
-
-        # Tolerance for floating-point comparison
-        self.padding_epsilon = FLOAT_COMPARISON
-        
+        self.global_variables = data_spec["global_variables"]
         # Load shard metadata first to determine structure
         self._load_metadata()
         
@@ -165,42 +159,51 @@ class AtmosphericDataset(Dataset):
         self._tgt_dtype = tgt_dtype
         self._glb_dtype = glb_dtype
         
-        # Validate and filter indices against total_samples for *both* modes
-        self._valid_indices = [i for i in self.indices if 0 <= i < self.total_samples]
-        n_invalid = len(self.indices) - len(self._valid_indices)
-        if n_invalid:
-            logger.warning(f"{n_invalid} indices out of range [0,{self.total_samples}) were dropped.")
+        # Validate indices against total_samples for *both* modes (hard-fail policy).
+        if self.indices is None:
+            self._valid_indices: Sequence[int] = range(self.total_samples)
+            self._identity_indices = True
+            invalid_indices: List[int] = []
+        else:
+            self._valid_indices = self.indices
+            self._identity_indices = False
+            invalid_indices = [i for i in self._valid_indices if not (0 <= i < self.total_samples)]
+        if invalid_indices:
+            preview = invalid_indices[:10]
+            raise RuntimeError(
+                f"Found {len(invalid_indices)} invalid indices outside [0, {self.total_samples}). "
+                f"First examples: {preview}"
+            )
         
         # Calculate total memory needed
         total_bytes_needed = total_bytes_per_sample * len(self._valid_indices)
         total_gb_needed = total_bytes_needed / (1024**3)
         
-        # Get available memory (use 80% as safety margin)
+        # Get available memory and apply configured safety margin.
         available_memory = psutil.virtual_memory().available
         available_gb = available_memory / (1024**3)
-        safe_available_gb = available_gb * 0.8
+        safe_available_gb = available_gb * self.ram_safety_fraction
         
         logger.info(
             f"Memory estimate: {total_gb_needed:.2f} GB needed for {len(self._valid_indices)} samples, "
             f"{safe_available_gb:.2f} GB safely available"
         )
         
-        # Choose loading strategy
-        if self.force_disk_loading:
-            logger.info("Force disk loading enabled - using disk cache mode")
+        # Choose loading strategy from explicit config.
+        selected_mode = self.loading_mode
+        if selected_mode == "auto":
+            selected_mode = "ram" if total_gb_needed < safe_available_gb else "disk"
+            logger.info("Auto-selected dataset loading mode: %s", selected_mode)
+
+        if selected_mode == "disk":
             self._setup_disk_cache()
             self.ram_mode = False
-        elif total_gb_needed < safe_available_gb:
+        elif selected_mode == "ram":
             logger.info("Loading entire dataset into RAM...")
             self._load_all_to_ram()
             self.ram_mode = True
         else:
-            logger.warning(
-                f"Dataset too large for RAM ({total_gb_needed:.2f} GB > "
-                f"{safe_available_gb:.2f} GB available). Using disk cache mode."
-            )
-            self._setup_disk_cache()
-            self.ram_mode = False
+            raise ValueError(f"Unsupported dataset loading mode '{selected_mode}'.")
     
     def _load_all_to_ram(self) -> None:
         """Load entire dataset into RAM for fast access."""
@@ -218,7 +221,6 @@ class AtmosphericDataset(Dataset):
                 np.zeros((0, len(self.global_variables)), dtype=self._glb_dtype)
                 if self.has_globals else None
             )
-            self.ram_index_map = {}
             return
         
         # Allocate arrays with correct dtype
@@ -232,18 +234,34 @@ class AtmosphericDataset(Dataset):
             glb_shape = (n_samples, len(self.global_variables))
             self.ram_globals = np.zeros(glb_shape, dtype=self._glb_dtype)
         
-        # Create index mapping
-        self.ram_index_map = {}
-        
+        # Fast path when consuming the full split in natural order.
+        if self._identity_indices:
+            processed = 0
+            for shard_idx in range(self.num_shards):
+                shard_name = f"shard_{shard_idx:06d}.npy"
+                seq_data = np.load(self.dir_path / "sequence_inputs" / shard_name)
+                tgt_data = np.load(self.dir_path / "targets" / shard_name)
+                n_rows = int(seq_data.shape[0])
+                end = processed + n_rows
+                self.ram_sequences[processed:end] = seq_data
+                self.ram_targets[processed:end] = tgt_data
+                if self.has_globals:
+                    glb_data = np.load(self.dir_path / "globals" / shard_name)
+                    self.ram_globals[processed:end] = glb_data
+                processed = end
+                if processed % 10000 == 0 or processed == n_samples:
+                    logger.info(f"Loaded {processed}/{n_samples} samples into RAM")
+            return
+
         # Group validated indices by shard for efficient loading
-        indices_by_shard = {}
+        indices_by_shard: Dict[int, List[Tuple[int, int]]] = {}
         for idx, original_idx in enumerate(self._valid_indices):
             shard_idx = original_idx // self.shard_size
             within_shard_idx = original_idx % self.shard_size
             
             if shard_idx not in indices_by_shard:
                 indices_by_shard[shard_idx] = []
-            indices_by_shard[shard_idx].append((idx, within_shard_idx, original_idx))
+            indices_by_shard[shard_idx].append((idx, within_shard_idx))
         
         # Load data shard by shard
         processed = 0
@@ -257,58 +275,54 @@ class AtmosphericDataset(Dataset):
             if self.has_globals:
                 glb_data = np.load(self.dir_path / "globals" / shard_name)
             
-            # Extract samples from this shard
-            for idx, within_shard_idx, original_idx in indices_by_shard[shard_idx]:
-                self.ram_sequences[idx] = seq_data[within_shard_idx]
-                self.ram_targets[idx] = tgt_data[within_shard_idx]
-                
-                if self.has_globals:
-                    self.ram_globals[idx] = glb_data[within_shard_idx]
-                
-                self.ram_index_map[idx] = original_idx
-                processed += 1
+            # Vectorized extraction from this shard
+            shard_pairs = indices_by_shard[shard_idx]
+            pairs_arr = np.array(shard_pairs, dtype=np.int64)
+            dest_idx = pairs_arr[:, 0]
+            src_idx = pairs_arr[:, 1]
+
+            self.ram_sequences[dest_idx] = seq_data[src_idx]
+            self.ram_targets[dest_idx] = tgt_data[src_idx]
+            if self.has_globals:
+                self.ram_globals[dest_idx] = glb_data[src_idx]
+            processed += int(dest_idx.size)
             
             if processed % 10000 == 0 or processed == n_samples:
                 logger.info(f"Loaded {processed}/{n_samples} samples into RAM")
     
     def _setup_disk_cache(self) -> None:
         """Setup disk caching with memory mapping for large files."""
-        # Map validated indices to shards
+        # Map validated indices to shards (skip list materialization for identity indexing).
         self.effective_indices = []
-        for idx in self._valid_indices:
-            shard_idx = idx // self.shard_size
-            within_shard_idx = idx % self.shard_size
-            self.effective_indices.append((idx, shard_idx, within_shard_idx))
+        if not self._identity_indices:
+            for idx in self._valid_indices:
+                shard_idx = idx // self.shard_size
+                within_shard_idx = idx % self.shard_size
+                self.effective_indices.append((idx, shard_idx, within_shard_idx))
         
-        # Initialize caches
-        self._shard_cache = {}  # For small shards loaded fully
-        self._mmap_cache = {}   # For memory-mapped large shards
-        self._cache_size = min(len(self.seq_shards), 200)
-        self._cache_order = []
+        # Initialize bounded shard cache (LRU).
+        self._shard_cache: "OrderedDict[int, Dict[str, Any]]" = OrderedDict()
+        self._cache_size = min(len(self.seq_shards), self.max_cached_shards)
         
         # Pre-load frequently accessed shards
         logger.info(f"Pre-loading up to {self._cache_size} shards into cache...")
-        unique_shard_indices = sorted(set(idx[1] for idx in self.effective_indices))
+        if self._identity_indices:
+            unique_shard_indices = list(range(self.num_shards))
+        else:
+            unique_shard_indices = sorted(set(idx[1] for idx in self.effective_indices))
         
         for i, shard_idx in enumerate(unique_shard_indices[:self._cache_size]):
             self._load_shard(shard_idx)
             if (i + 1) % 20 == 0:
                 logger.info(f"Pre-loaded {i + 1} shards")
     
-    def _load_shard(self, shard_idx: int) -> Dict[str, np.ndarray]:
-        """Load a shard with intelligent caching strategy."""
-        if shard_idx in self._shard_cache:
-            # Thread-safe LRU update
-            try:
-                self._cache_order.remove(shard_idx)
-            except ValueError:
-                pass
-            self._cache_order.append(shard_idx)
-            return self._shard_cache[shard_idx]
-        
-        if shard_idx in self._mmap_cache:
-            return self._mmap_cache[shard_idx]
-        
+    def _load_shard(self, shard_idx: int) -> Dict[str, Any]:
+        """Load a shard with bounded LRU caching."""
+        cached = self._shard_cache.pop(shard_idx, None)
+        if cached is not None:
+            self._shard_cache[shard_idx] = cached
+            return cached
+
         shard_name = f"shard_{shard_idx:06d}.npy"
         seq_path = self.dir_path / "sequence_inputs" / shard_name
         tgt_path = self.dir_path / "targets" / shard_name
@@ -316,47 +330,45 @@ class AtmosphericDataset(Dataset):
         if not (seq_path.exists() and tgt_path.exists()):
             raise RuntimeError(f"Missing shard files for shard {shard_idx}")
         
-        # Memory map large files (>50MB)
-        if seq_path.stat().st_size > 50 * 1024 * 1024:
+        # Memory map large files and keep references in a bounded cache.
+        if seq_path.stat().st_size > self.large_shard_mmap_bytes:
             shard_data = {
                 "sequence_inputs": np.load(seq_path, mmap_mode='r'),
                 "targets": np.load(tgt_path, mmap_mode='r'),
+                "mmap_backed": True,
             }
             if self.has_globals:
                 glb_path = self.dir_path / "globals" / shard_name
                 if not glb_path.exists():
                     raise RuntimeError(f"Missing globals for shard {shard_idx}")
                 shard_data["globals"] = np.load(glb_path, mmap_mode='r')
-            
-            self._mmap_cache[shard_idx] = shard_data
         else:
             shard_data = {
                 "sequence_inputs": np.load(seq_path),
                 "targets": np.load(tgt_path),
+                "mmap_backed": False,
             }
             if self.has_globals:
                 glb_path = self.dir_path / "globals" / shard_name
                 if not glb_path.exists():
                     raise RuntimeError(f"Missing globals for shard {shard_idx}")
                 shard_data["globals"] = np.load(glb_path)
-            
-            # LRU eviction
-            if len(self._cache_order) >= self._cache_size:
-                oldest = self._cache_order.pop(0)
-                del self._shard_cache[oldest]
-            
-            self._shard_cache[shard_idx] = shard_data
-            self._cache_order.append(shard_idx)
-        
+
+        # LRU eviction
+        if len(self._shard_cache) >= self._cache_size:
+            self._shard_cache.popitem(last=False)
+        self._shard_cache[shard_idx] = shard_data
         return shard_data
     
     def __len__(self) -> int:
         """Return number of loadable samples in dataset."""
-        if getattr(self, "ram_mode", False):
-            return len(self.ram_sequences) if hasattr(self, "ram_sequences") else 0
-        return len(self.effective_indices) if hasattr(self, "effective_indices") else 0
+        if self.ram_mode:
+            return len(self.ram_sequences)
+        if self._identity_indices:
+            return self.total_samples
+        return len(self.effective_indices)
     
-    def __getitem__(self, idx: int) -> Tuple[Dict[str, Tensor], Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
         """
         Get a single sample from the dataset.
         
@@ -364,7 +376,7 @@ class AtmosphericDataset(Dataset):
             idx: Sample index
             
         Returns:
-            Tuple of (input_dict, target_tensor)
+            Tuple of (input_dict, target_array)
         """
         if not (0 <= idx < len(self)):
             raise IndexError(f"Index {idx} out of range for dataset of size {len(self)}")
@@ -375,17 +387,21 @@ class AtmosphericDataset(Dataset):
             tgt_np = self.ram_targets[idx]
             
             # Create input dictionary
-            inputs = {"sequence": torch.from_numpy(seq_in_np.copy()).to(DTYPE)}
+            inputs = {"sequence": seq_in_np}
             
             if self.has_globals:
                 glb_np = self.ram_globals[idx]
-                inputs["global_features"] = torch.from_numpy(glb_np.copy()).to(DTYPE)
+                inputs["global_features"] = glb_np
             
-            targets = torch.from_numpy(tgt_np.copy()).to(DTYPE)
+            targets = tgt_np
             
         else:
             # Disk cache path
-            global_idx, shard_idx, within_shard_idx = self.effective_indices[idx]
+            if self._identity_indices:
+                shard_idx = idx // self.shard_size
+                within_shard_idx = idx % self.shard_size
+            else:
+                _, shard_idx, within_shard_idx = self.effective_indices[idx]
             
             # Load the shard
             shard_data = self._load_shard(shard_idx)
@@ -394,20 +410,20 @@ class AtmosphericDataset(Dataset):
             seq_in_np = shard_data["sequence_inputs"][within_shard_idx]
             tgt_np = shard_data["targets"][within_shard_idx]
             
-            # Copy from memory-mapped arrays to ensure tensor owns memory
-            if hasattr(seq_in_np, 'base') and seq_in_np.base is not None:
+            # Optional copy policy for mmap-backed slices only.
+            if self.copy_mmap_slices and bool(shard_data.get("mmap_backed", False)):
                 seq_in_np = seq_in_np.copy()
                 tgt_np = tgt_np.copy()
             
-            inputs = {"sequence": torch.from_numpy(seq_in_np).to(DTYPE)}
+            inputs = {"sequence": seq_in_np}
             
             if self.has_globals and "globals" in shard_data:
                 glb_np = shard_data["globals"][within_shard_idx]
-                if hasattr(glb_np, 'base') and glb_np.base is not None:
+                if self.copy_mmap_slices and bool(shard_data.get("mmap_backed", False)):
                     glb_np = glb_np.copy()
-                inputs["global_features"] = torch.from_numpy(glb_np).to(DTYPE)
+                inputs["global_features"] = glb_np
             
-            targets = torch.from_numpy(tgt_np).to(DTYPE)
+            targets = tgt_np
         
         return inputs, targets
 
@@ -415,7 +431,7 @@ class AtmosphericDataset(Dataset):
 def create_dataset(
     dir_path: Path,
     config: Dict[str, Any],
-    indices: List[int],
+    indices: Optional[Sequence[int]],
 ) -> AtmosphericDataset:
     """
     Create a dataset instance.
@@ -423,7 +439,7 @@ def create_dataset(
     Args:
         dir_path: Directory containing processed data
         config: Configuration dictionary
-        indices: List of sample indices to use
+        indices: Optional sample indices to use; None means all samples
         
     Returns:
         AtmosphericDataset instance
@@ -437,9 +453,10 @@ def create_dataset(
 
 
 def pad_collate(
-    batch: List[Tuple[Dict[str, Tensor], Tensor]],
-    padding_value: float = PADDING_VALUE,
-    padding_epsilon: float = 1e-6,
+    batch: List[Tuple[Dict[str, np.ndarray], np.ndarray]],
+    padding_value: float,
+    padding_epsilon: float,
+    tensor_dtype: Optional[torch.dtype] = None,
 ) -> Tuple[Dict[str, Tensor], Dict[str, Tensor], Tensor, Tensor]:
     """
     Collate function with safe padding detection.
@@ -459,13 +476,28 @@ def pad_collate(
         where masks have True for padding positions
     """
     inputs, targets = zip(*batch)
+
+    def _stack_to_tensor(values: Sequence[np.ndarray | Tensor]) -> Tensor:
+        first = values[0]
+        if isinstance(first, torch.Tensor):
+            tensor_values = [
+                v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
+                for v in values
+            ]
+            tensor = torch.stack(tensor_values)
+        else:
+            stacked_np = np.stack(values, axis=0)
+            tensor = torch.from_numpy(stacked_np)
+        if tensor_dtype is not None and tensor.dtype != tensor_dtype:
+            tensor = tensor.to(dtype=tensor_dtype)
+        return tensor
     
     # Stack sequences
-    seq = torch.stack([d["sequence"] for d in inputs])
+    seq = _stack_to_tensor([d["sequence"] for d in inputs])
     
     # Create padding mask (True = padding position)
     # A timestep is considered padding if ALL features equal padding_value
-    seq_mask = (torch.abs(seq - padding_value) < padding_epsilon).all(dim=-1)
+    seq_mask = (torch.abs(seq - padding_value) <= padding_epsilon).all(dim=-1)
     
     # Build batched inputs and masks
     batched = {"sequence": seq}
@@ -473,34 +505,48 @@ def pad_collate(
     
     # Handle global features if present
     if "global_features" in inputs[0]:
-        batched["global_features"] = torch.stack([d["global_features"] for d in inputs])
+        batched["global_features"] = _stack_to_tensor(
+            [d["global_features"] for d in inputs]
+        )
     
     # Stack targets and create masks
-    tgt = torch.stack(targets)
+    tgt = _stack_to_tensor(targets)
     
     # Target mask: True = padding position
     # All target features at a timestep should be padding_value if it's a padding position
-    tgt_mask = (torch.abs(tgt - padding_value) < padding_epsilon).all(dim=-1)
+    tgt_mask = (torch.abs(tgt - padding_value) <= padding_epsilon).all(dim=-1)
     
     # Validate that sequence and target masks match
     # (padding positions should be the same for inputs and targets)
     if not torch.equal(seq_mask, tgt_mask):
-        logger.warning("Sequence and target padding masks don't match!")
+        raise RuntimeError("Sequence and target padding masks do not match.")
+    if bool(tgt_mask.all()):
+        raise RuntimeError("All-padding batch encountered during collation.")
     
     return batched, masks, tgt, tgt_mask
 
 
-def create_collate_fn(padding_value: float) -> Callable:
+def create_collate_fn(
+    padding_value: float,
+    padding_epsilon: float,
+    tensor_dtype: Optional[torch.dtype] = None,
+) -> Callable:
     """
-    Create a collate function with specified padding value.
-    
+    Create a collate function with specified padding value and epsilon.
+
     Args:
         padding_value: Sentinel value for padding
-        
+        padding_epsilon: Tolerance for padding comparison
+
     Returns:
         Partial collate function
     """
-    return partial(pad_collate, padding_value=padding_value)
+    return partial(
+        pad_collate,
+        padding_value=padding_value,
+        padding_epsilon=padding_epsilon,
+        tensor_dtype=tensor_dtype,
+    )
 
 
 __all__ = ["AtmosphericDataset", "create_dataset", "create_collate_fn"]

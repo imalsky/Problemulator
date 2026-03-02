@@ -4,32 +4,21 @@
     "num_workers": 1,
     "detect_anomaly": false,
     "shard_size": 10000,
+    "hdf5_read_chunk_size": 8192,
+    "device_backend": "mps",
     "torch_compile": false,
     "compile_mode": "default",
-    "torch_export": false
+    "execution_mode": "train",
+    "rebuild_processed_data": false,
+    "dataset_loading_mode": "auto",
+    "dataset_max_cached_shards": 200,
+    "dataset_large_shard_mmap_bytes": 52428800,
+    "dataset_ram_safety_fraction": 0.8,
+    "dataset_copy_mmap_slices": true
   },
   "data_paths_config": {
     "hdf5_dataset_filename": [
-      "picaso_results_1.h5",
-      "picaso_results_2.h5",
-      "picaso_results_3.h5",
-      "picaso_results_4.h5",
-      "picaso_results_5.h5",
-      "picaso_results_6.h5",
-      "picaso_results_7.h5",
-      "picaso_results_8.h5",
-      "picaso_results_9.h5",
-      "picaso_results_10.h5",
-      "picaso_results_11.h5",
-      "picaso_results_12.h5",
-      "picaso_results_13.h5",
-      "picaso_results_14.h5",
-      "picaso_results_15.h5",
-      "picaso_results_16.h5",
-      "picaso_results_17.h5",
-      "picaso_results_18.h5",
-      "picaso_results_19.h5",
-      "picaso_results_20.h5"
+      "picaso_results_1.h5"
     ],
     "dataset_splits_filename": "dataset_splits.json"
   },
@@ -45,6 +34,18 @@
       "net_thermal_flux",
       "net_reflected_flux"
     ],
+    "strictly_positive_variables": [
+      "pressure_bar",
+      "temperature_k",
+      "orbital_distance_m"
+    ],
+    "variable_units": {
+      "pressure_bar": "bar",
+      "temperature_k": "K",
+      "orbital_distance_m": "m",
+      "net_thermal_flux": "erg cm^-2 s^-1",
+      "net_reflected_flux": "erg cm^-2 s^-1"
+    },
     "padding_value": -9999.0
   },
   "normalization": {
@@ -55,88 +56,57 @@
       "net_thermal_flux": "symlog",
       "net_reflected_flux": "symlog"
     },
-    "default_method": "standard",
     "epsilon": 1e-9,
+    "padding_comparison_epsilon": 1e-6,
+    "normalized_value_clamp": 50.0,
+    "log_min_max_clamp_min": 0.0,
+    "log_min_max_clamp_max": 1.0,
+    "symlog_min_threshold_multiplier": 100.0,
+    "stats_max_block_bytes": 536870912,
+    "stats_max_span_multiplier": 16,
+    "stats_chunk_size": 4096,
     "quantile_max_values_in_memory": 100000,
     "symlog_percentile": 0.01
   },
+  "precision": {
+    "input_dtype": "float32",
+    "stats_accumulation_dtype": "float32",
+    "model_dtype": "float32",
+    "forward_dtype": "float32",
+    "loss_dtype": "float32",
+    "optimizer_state_dtype": "float32",
+    "amp_autocast_dtype": "none",
+    "float32_matmul_precision": "high"
+  },
   "model_hyperparameters": {
-    "d_model": 256,
+    "d_model": 128,
     "nhead": 4,
-    "num_encoder_layers": 4,
-    "dim_feedforward": 1024,
+    "num_encoder_layers": 3,
+    "dim_feedforward": 512,
     "dropout": 0.0,
     "attention_dropout": 0.0,
     "film_clamp": 10.0,
-    "max_sequence_length": 100
+    "max_sequence_length": 100,
+    "output_head_divisor": 2,
+    "output_head_dropout_factor": 0.5
   },
   "training_hyperparameters": {
     "epochs": 300,
-    "batch_size": 512,
+    "batch_size": 1024,
     "learning_rate": 0.0001,
     "weight_decay": 1e-05,
     "optimizer": "adamw",
     "gradient_clip_val": 2.0,
-    "gradient_accumulation_steps": 1,
     "scheduler_type": "cosine",
-    "min_lr": 1e-08,
+    "min_lr": 1e-06,
     "warmup_epochs": 10,
+    "warmup_start_factor": 1e-05,
     "early_stopping_patience": 99999,
     "min_delta": 1e-09,
     "use_amp": false,
-    "dataset_fraction_to_use": 1.0,
-    "val_frac": 0.15,
-    "test_frac": 0.15,
-    "max_batch_failure_rate": 0.1
+    "dataset_fraction_to_use": 1.0
   },
   "output_paths_config": {
     "fixed_model_foldername": "trained_model"
-  },
-  "hyperparameter_search": {
-    "d_model": [
-      128,
-      256,
-      384,
-      512,
-      768,
-      1024
-    ],
-    "nhead_divisors": [
-      4,
-      8,
-      16
-    ],
-    "num_encoder_layers": [
-      2,
-      4,
-      6,
-      8
-    ],
-    "dim_feedforward": [
-      512,
-      1024,
-      2048,
-      4096
-    ],
-    "dropout": {
-      "low": 0.05,
-      "high": 0.2
-    },
-    "attention_dropout": {
-      "low": 0.0,
-      "high": 0.2
-    },
-    "batch_size": [
-      128,
-      256,
-      512,
-      1024,
-      2048
-    ],
-    "learning_rate": {
-      "low": 5e-05,
-      "high": 0.0005,
-      "log": true
-    }
   }
 }

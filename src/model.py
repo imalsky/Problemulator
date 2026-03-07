@@ -74,7 +74,7 @@ class FiLMLayer(nn.Module):
             self,
             context_dim: int,
             feature_dim: int,
-            clamp_gamma: Optional[float] = 2.0
+            clamp_gamma: float = 2.0,
     ) -> None:
         """
         Initialize FiLM layer.
@@ -82,9 +82,11 @@ class FiLMLayer(nn.Module):
         Args:
             context_dim: Dimension of context vector
             feature_dim: Dimension of features to modulate
-            clamp_gamma: Maximum magnitude for scale/shift (None for no clamping)
+            clamp_gamma: Maximum magnitude for scale/shift
         """
         super().__init__()
+        if float(clamp_gamma) <= 0.0:
+            raise ValueError("clamp_gamma must be > 0.")
 
         # Project context to scale and shift parameters
         self.projection = nn.Linear(context_dim, feature_dim * 2)
@@ -93,37 +95,29 @@ class FiLMLayer(nn.Module):
         nn.init.xavier_uniform_(self.projection.weight, gain=0.1)
         nn.init.zeros_(self.projection.bias)
 
-        # Register clamp value as a buffer for proper export
-        if clamp_gamma is not None:
-            self.register_buffer(
-                'clamp_gamma',
-                torch.tensor(clamp_gamma, dtype=torch.float32),
-                persistent=False
-            )
-        else:
-            self.register_buffer(
-                'clamp_gamma',
-                torch.tensor(float('inf'), dtype=torch.float32),
-                persistent=False
-            )
+        # Keep the clamp as a tensor buffer so export and dtype/device moves stay aligned.
+        self.register_buffer(
+            'clamp_gamma',
+            torch.tensor(clamp_gamma, dtype=torch.float32),
+            persistent=False
+        )
 
     def forward(self, features: Tensor, context: Tensor) -> Tensor:
         """
         Apply FiLM modulation to features.
 
         Args:
-            features: Features to modulate (batch, seq_len, feature_dim)
-            context: Global context (batch, context_dim)
+            features: Feature tensor with shape ``[batch, seq_len, feature_dim]``
+            context: Global context tensor with shape ``[batch, context_dim]``
 
         Returns:
-            Modulated features
+            Modulated feature tensor with shape ``[batch, seq_len, feature_dim]``
         """
         # Get scale and shift parameters
         gamma_beta = self.projection(context)
         delta_gamma, beta = torch.chunk(gamma_beta, 2, dim=-1)
 
-        # Always apply clamping (when clamp_gamma is inf, this has no effect)
-        # This avoids data-dependent conditionals for torch.export compatibility
+        # Clamp both FiLM branches to the explicitly configured range.
         clamp_val = self.clamp_gamma.to(features.dtype)
         delta_gamma = torch.clamp(delta_gamma, -clamp_val, clamp_val)
         beta = torch.clamp(beta, -clamp_val, clamp_val)
@@ -141,7 +135,7 @@ class DecomposedTransformerEncoderLayer(nn.Module):
     Custom transformer encoder layer built from primitives.
 
     Fully compatible with torch.export and torch.compile.
-    Supports both pre-norm and post-norm architectures.
+    Implements the checked-in pre-norm GELU architecture directly.
 
     ATTENTION MASKING:
     - Uses src_key_padding_mask where True = padding position
@@ -155,8 +149,6 @@ class DecomposedTransformerEncoderLayer(nn.Module):
             dim_feedforward: int = 2048,
             dropout: float = 0.1,
             attention_dropout: float = 0.1,
-            activation: str = "gelu",
-            norm_first: bool = True,
             batch_first: bool = True,
     ) -> None:
         """
@@ -168,13 +160,9 @@ class DecomposedTransformerEncoderLayer(nn.Module):
             dim_feedforward: Feedforward network dimension
             dropout: Dropout probability for feedforward and residual
             attention_dropout: Dropout probability for attention
-            activation: Activation function ("gelu" or "relu")
-            norm_first: If True, use pre-norm architecture
             batch_first: If True, expect batch dimension first
         """
         super().__init__()
-
-        self.norm_first = norm_first
 
         # Multi-head attention with separate dropout
         self.self_attn = nn.MultiheadAttention(
@@ -188,13 +176,8 @@ class DecomposedTransformerEncoderLayer(nn.Module):
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
-        # Activation function
-        if activation == "gelu":
-            self.activation = nn.GELU()
-        elif activation == "relu":
-            self.activation = nn.ReLU()
-        else:
-            raise ValueError(f"Unsupported activation: {activation}")
+        # The checked-in architecture uses GELU consistently.
+        self.activation = nn.GELU()
 
         # Normalization layers
         self.norm1 = nn.LayerNorm(d_model)
@@ -233,42 +216,23 @@ class DecomposedTransformerEncoderLayer(nn.Module):
         Returns:
             Transformed sequence
         """
-        if self.norm_first:
-            # Pre-norm architecture
-            x = src
+        # Pre-norm transformer block:
+        # src: [batch, seq_len, d_model]
+        # src_key_padding_mask: [batch, seq_len], True for padding.
+        x = src
 
-            # Self-attention block
-            x2 = self.norm1(x)
-            x2, _ = self.self_attn(
-                x2, x2, x2,
-                attn_mask=src_mask,
-                key_padding_mask=src_key_padding_mask,
-                need_weights=False
-            )
-            x = x + self.dropout1(x2)
+        x2 = self.norm1(x)
+        x2, _ = self.self_attn(
+            x2, x2, x2,
+            attn_mask=src_mask,
+            key_padding_mask=src_key_padding_mask,
+            need_weights=False
+        )
+        x = x + self.dropout1(x2)
 
-            # Feed-forward block
-            x2 = self.norm2(x)
-            x2 = self.linear2(self.dropout(self.activation(self.linear1(x2))))
-            x = x + self.dropout2(x2)
-        else:
-            # Post-norm architecture
-            x = src
-
-            # Self-attention block
-            x2, _ = self.self_attn(
-                x, x, x,
-                attn_mask=src_mask,
-                key_padding_mask=src_key_padding_mask,
-                need_weights=False
-            )
-            x = x + self.dropout1(x2)
-            x = self.norm1(x)
-
-            # Feed-forward block
-            x2 = self.linear2(self.dropout(self.activation(self.linear1(x))))
-            x = x + self.dropout2(x2)
-            x = self.norm2(x)
+        x2 = self.norm2(x)
+        x2 = self.linear2(self.dropout(self.activation(self.linear1(x2))))
+        x = x + self.dropout2(x2)
 
         return x
 
@@ -288,8 +252,8 @@ class TransformerBlock(nn.Module):
             dropout: float,
             attention_dropout: float,
             global_input_dim: int,
-            film_clamp: Optional[float] = 2.0,
-    ):
+            film_clamp: float = 2.0,
+    ) -> None:
         """
         Initialize transformer block with optional FiLM.
 
@@ -313,8 +277,6 @@ class TransformerBlock(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             attention_dropout=attention_dropout,
-            activation="gelu",
-            norm_first=True,
             batch_first=True,
         )
 
@@ -373,8 +335,7 @@ class PredictionModel(nn.Module):
             dropout: float,
             attention_dropout: float,
             max_sequence_length: int,
-            padding_value: float,
-            film_clamp: Optional[float],
+            film_clamp: float,
             output_head_divisor: int,
             output_head_dropout_factor: float,
     ) -> None:
@@ -392,7 +353,6 @@ class PredictionModel(nn.Module):
             dropout: Dropout probability
             attention_dropout: Attention dropout probability
             max_sequence_length: Maximum allowed sequence length
-            padding_value: Value used for padding (for reference only)
             film_clamp: Clamping value for FiLM parameters
             output_head_divisor: Divisor for intermediate output projection dimension
             output_head_dropout_factor: Factor applied to dropout for lighter pre-output dropout
@@ -411,8 +371,8 @@ class PredictionModel(nn.Module):
             raise ValueError("attention_dropout must be in [0, 1].")
         if int(max_sequence_length) <= 0:
             raise ValueError("max_sequence_length must be a positive integer.")
-        if film_clamp is not None and float(film_clamp) <= 0:
-            raise ValueError("film_clamp must be > 0 when provided.")
+        if float(film_clamp) <= 0:
+            raise ValueError("film_clamp must be > 0.")
         if int(output_head_divisor) <= 0:
             raise ValueError("output_head_divisor must be a positive integer.")
         if not (0.0 <= float(output_head_dropout_factor) <= 1.0):
@@ -421,8 +381,6 @@ class PredictionModel(nn.Module):
         self.d_model = d_model
         self.has_global_features = global_input_dim > 0
         self.max_sequence_length = int(max_sequence_length)
-
-        self.padding_value = padding_value
 
 
         self.input_proj = nn.Sequential(
@@ -520,7 +478,7 @@ class PredictionModel(nn.Module):
             sequence_mask: Padding mask where True = padding position
 
         Returns:
-            Output predictions (batch, seq_len, output_dim)
+            Output predictions with shape ``[batch, seq_len, output_dim]``
 
         Note: Outputs at padding positions are NOT overwritten.
               The loss function handles masking these positions.
@@ -615,7 +573,6 @@ def create_prediction_model(
         dropout=float(model_params["dropout"]),
         attention_dropout=float(model_params["attention_dropout"]),
         max_sequence_length=int(model_params["max_sequence_length"]),
-        padding_value=float(data_spec["padding_value"]),
         film_clamp=float(model_params["film_clamp"]),
         output_head_divisor=int(model_params["output_head_divisor"]),
         output_head_dropout_factor=float(model_params["output_head_dropout_factor"]),

@@ -472,8 +472,12 @@ def pad_collate(
         padding_epsilon: Tolerance for padding comparison
         
     Returns:
-        Tuple of (batched_inputs, masks, batched_targets, target_masks)
-        where masks have True for padding positions
+        Tuple ``(batched_inputs, masks, batched_targets, target_masks)`` where:
+        - ``batched_inputs["sequence"]`` has shape ``[batch, seq_len, input_dim]``
+        - ``masks["sequence"]`` has shape ``[batch, seq_len]``
+        - ``batched_targets`` has shape ``[batch, seq_len, target_dim]``
+        - ``target_masks`` has shape ``[batch, seq_len]``
+        All masks use ``True`` for padding positions.
     """
     inputs, targets = zip(*batch)
 
@@ -495,8 +499,8 @@ def pad_collate(
     # Stack sequences
     seq = _stack_to_tensor([d["sequence"] for d in inputs])
     
-    # Create padding mask (True = padding position)
-    # A timestep is considered padding if ALL features equal padding_value
+    # Padding is defined per timestep: every feature in that row must match the
+    # configured sentinel before the timestep is considered padded.
     seq_mask = (torch.abs(seq - padding_value) <= padding_epsilon).all(dim=-1)
     
     # Build batched inputs and masks
@@ -512,8 +516,8 @@ def pad_collate(
     # Stack targets and create masks
     tgt = _stack_to_tensor(targets)
     
-    # Target mask: True = padding position
-    # All target features at a timestep should be padding_value if it's a padding position
+    # Targets must use the same padding pattern as inputs so the attention mask
+    # and masked regression loss stay aligned.
     tgt_mask = (torch.abs(tgt - padding_value) <= padding_epsilon).all(dim=-1)
     
     # Validate that sequence and target masks match

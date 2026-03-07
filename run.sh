@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+
 #SBATCH -J Transformer
 #SBATCH -o Transformer.o%j
 #SBATCH -e Transformer.e%j

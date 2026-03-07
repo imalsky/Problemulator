@@ -7,8 +7,13 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def _mps_is_available() -> bool:
+    """Return whether the current PyTorch build can execute on Apple MPS."""
+    return bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+
+
 def setup_device(requested_backend: str) -> torch.device:
-    """Select configured compute device backend; never silently fall back."""
+    """Select the configured compute backend and hard-fail on unavailability."""
     backend = requested_backend.strip().lower()
     if backend == "cuda":
         if not torch.cuda.is_available():
@@ -22,7 +27,7 @@ def setup_device(requested_backend: str) -> torch.device:
         return device
 
     if backend == "mps":
-        if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+        if not _mps_is_available():
             raise RuntimeError("Configured backend 'mps' is not available.")
         logger.info("Using Apple MPS device.")
         return torch.device("mps")
@@ -39,4 +44,4 @@ def should_pin_memory(device: torch.device) -> bool:
     return device.type == "cuda"
 
 
-__all__ = ["setup_device", "should_pin_memory"]
+__all__ = ["setup_device", "should_pin_memory", "_mps_is_available"]

@@ -32,7 +32,7 @@ from utils import (
     setup_logging,
 )
 
-# Default paths are anchored to project root (sibling of src/, config/, testing/),
+# Default paths are anchored to project root (sibling of src/, config/, unit_tests/),
 # not the process working directory.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.jsonc"

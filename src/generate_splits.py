@@ -13,7 +13,7 @@ import numpy as np
 
 from utils import compress_splits, get_config_str, load_config, save_json, setup_logging
 
-# Default paths are anchored to project root (sibling of src/, config/, testing/),
+# Default paths are anchored to project root (sibling of src/, config/, unit_tests/),
 # not the process working directory.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.jsonc"

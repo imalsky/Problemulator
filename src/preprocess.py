@@ -494,7 +494,7 @@ def preprocess_data(
                                 raise KeyError(f"Missing normalization metadata for input variable '{var}'.")
                             method = str(norm_methods[var])
                             stats = norm_stats[var]
-                            if method not in ("none", "bool") and stats:
+                            if method != "bool" and stats:
                                 channel = seq_in[:, :, j]
                                 if has_valid:
                                     channel[valid_mask] = DataNormalizer.normalize_tensor(
@@ -509,7 +509,7 @@ def preprocess_data(
                                 raise KeyError(f"Missing normalization metadata for target variable '{var}'.")
                             method = str(norm_methods[var])
                             stats = norm_stats[var]
-                            if method not in ("none", "bool") and stats:
+                            if method != "bool" and stats:
                                 channel = tgt[:, :, j]
                                 if has_valid:
                                     channel[valid_mask] = DataNormalizer.normalize_tensor(
@@ -525,7 +525,7 @@ def preprocess_data(
                                     raise KeyError(f"Missing normalization metadata for global variable '{var}'.")
                                 method = str(norm_methods[var])
                                 stats = norm_stats[var]
-                                if method not in ("none", "bool") and stats:
+                                if method != "bool" and stats:
                                     # Globals are per-profile scalars (no padding), normalize directly.
                                     glb[:, j] = DataNormalizer.normalize_tensor(
                                         glb[:, j], method, stats,

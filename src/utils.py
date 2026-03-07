@@ -34,7 +34,6 @@ ALLOWED_NORMALIZATION_METHODS = {
     "standard",
     "log-standard",
     "bool",
-    "none",
 }
 REQUIRED_SPLIT_KEYS = {"train", "validation", "test"}
 REQUIRED_CONFIG_SECTIONS = {
@@ -395,11 +394,6 @@ def validate_config(config: Dict[str, Any]) -> None:
         lowered = method.lower()
         if lowered not in ALLOWED_NORMALIZATION_METHODS:
             raise ValueError(f"Unsupported normalization method '{method}' for '{var_name}'.")
-        if lowered == "none":
-            raise ValueError(
-                f"Normalization method for '{var_name}' cannot be 'none' for required variables."
-            )
-
     for required_key in (
         "epsilon",
         "padding_comparison_epsilon",

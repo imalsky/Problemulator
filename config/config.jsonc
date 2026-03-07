@@ -5,7 +5,7 @@
     "detect_anomaly": false,
     "shard_size": 10000,
     "hdf5_read_chunk_size": 8192,
-    "device_backend": "mps",
+    "device_backend": "cuda",
     "torch_compile": false,
     "compile_mode": "default",
     "execution_mode": "train",

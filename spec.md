@@ -14,6 +14,7 @@ This project is a scientific emulator for 1D radiative transfer profiles.
   - Extensible to additional variables and related profile-to-profile regression tasks
 - Non-goal:
   - Production hardening and backward-compatibility shims
+  - Rollout or in-the-loop simulation workflows; this repository does not provide them currently
 
 ### 1.1 Scientific Objective (Current Project)
 
@@ -129,7 +130,7 @@ This project is a scientific emulator for 1D radiative transfer profiles.
 - Implicit defaults in code are disallowed for runtime behavior.
 - One default execution behavior is defined in config (not via CLI mode switches).
 - CLI parser flags for operational mode selection are disallowed.
-- Default CLI file/directory paths are resolved from the repository root (the directory containing `src/`, `testing/`, and `config/`), not from process working directory.
+- Default CLI file/directory paths are resolved from the repository root (the directory containing `src/`, `unit_tests/`, and `config/`), not from process working directory.
 - `data/` and `models/` are required project-root sibling directories and must never resolve inside `src/`.
 - Hyperparameter and runtime policy values must be range-validated at config load time:
   - Invalid ranges are hard failures before preprocessing/training starts.
@@ -231,6 +232,7 @@ Behavior:
   - MPS
   - CUDA
 - Hardware availability is not assumed; behavior must be explicit and deterministic per selected backend.
+- The checked-in default backend is CUDA so the default config matches the SLURM launcher.
 
 ## 8. Artifact Policy
 
@@ -239,6 +241,7 @@ Required training outputs:
 - Model checkpoint(s)
 - Training logs
 - Training metadata
+- `test_metrics.json` from an immediate held-out test-loss pass after fitting
 
 Not produced during training:
 
@@ -246,8 +249,9 @@ Not produced during training:
 
 Post-training (manual workflow):
 
-- A single export path is supported:
-  - `testing/export.py` -> `models/trained_model/stand_alone_model.pt2`.
+- Training mode may run a basic held-out test evaluation immediately after fitting by
+  reloading the best checkpoint and writing normalized-space summary metrics.
+- Export and full scientific evaluation are optional manual steps outside the core training loop.
 - The exported model must accept physical-unit inputs and perform normalization/denormalization internally.
 - No normalized-space PT2 export artifact is maintained.
 
@@ -283,9 +287,9 @@ Use these tools continuously during development:
 
 Run these checks from the project root in the `nn` environment:
 
-- `ruff check src testing`
-- `pyflakes src testing`
-- `vulture src testing`
+- `ruff check src unit_tests`
+- `pyflakes src unit_tests`
+- `vulture src unit_tests`
 
 Current policy:
 
@@ -295,27 +299,20 @@ Current policy:
 ### 10.3 Review Scope
 
 - Do not spend time reading or auditing files in `data/` or `models/` unless explicitly asked.
-- Default review and maintenance scope is source and test code (`src/`, `testing/`, config/spec files).
+- Default review and maintenance scope is source and automated test code (`src/`, `unit_tests/`, config/spec files).
 
 ## 11. Testing Policy
 
-- In-project test/analysis scripts are primarily for post-training verification and export validation.
+- Automated regression coverage lives in `unit_tests/`.
 - Training itself is not blocked by fixed scientific metric thresholds at this stage.
 - Continue using current loss-driven training objective unless explicitly revised.
-- Existing scripts in `testing/` are canonical and should be maintained in place (do not create replacement scripts unless explicitly requested).
+- The configured training pipeline may run a post-fit test pass that records held-out masked
+  MSE and the best training epoch in `test_metrics.json`.
 - Post-training scientific evaluation should include:
   - Channel-wise absolute and signed percent-error analysis over the held-out test set.
   - Bias checks (signed-error central tendency near zero).
-- Testing/export workflow expectations:
-  - Use `testing/export.py` as the only export script.
-  - Use only `models/trained_model/stand_alone_model.pt2` for post-training inference/testing.
-  - Testing scripts must remain runnable from any working directory.
-  - PT2 inference scripts should load the exported program once and reuse `program.module()` for all batches (do not recreate it inside per-batch loops).
-- Canonical script responsibilities:
-  - `testing/export.py`: export standalone physical-space PT2 model.
-  - `testing/errors.py`: full-test-set scalar metrics and signed/absolute percent-error summaries using the standalone physical-space model.
-  - `testing/plot_example.py`: one-example true-vs-predicted profile plot from test split using the standalone physical-space model.
-  - `testing/training_progression.py`: training/validation/lr progression visualization from `training_log.csv`.
+- Manual export/evaluation utilities may exist, but they are not part of the required repository contract.
+- Any PT2 inference utility should load the exported program once and reuse `program.module()` for all batches.
 
 ## 12. Scientific Baseline Assumptions (Current Manuscript)
 
@@ -344,7 +341,8 @@ Current policy:
   - FiLM conditioning with global features (initial and per-block modulation).
   - Regression head to layerwise target channels with no final activation clamp.
 - Hyperparameters are config-defined and must not be hardcoded in source.
-- Current checked-in config baseline (`config/config.jsonc`, as of February 28, 2026):
+- Current checked-in config baseline (`config/config.jsonc`, as of March 7, 2026):
+  - `device_backend = cuda`
   - `d_model = 128`
   - `nhead = 4`
   - `num_encoder_layers = 3`
@@ -367,6 +365,7 @@ Any refactor toward this spec must verify all of the following:
 - Hard-fail handling for missing/invalid data and configuration.
 - Config-driven precision end-to-end.
 - No export in training path.
+- Training path behavior is explicit: fitting may be followed by a basic held-out test-loss pass.
 - All-padding batches fail immediately.
 - Compile failure cannot silently downgrade behavior.
 - Performance-sensitive paths are vectorized and profiled.

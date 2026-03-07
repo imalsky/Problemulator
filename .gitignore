@@ -1,28 +1,26 @@
-# Ignore everything inside the data folder
-data/*
-!data/.gitkeep
+# Generated data and model artifacts
+/data/*
+!/data/.gitkeep
+/models/
 
-# Ignore everything inside the figures folder
-figures/*
-!figures/.gitkeep
+# Generated figures and plots
+/figures/
+/plots/
 
-plots/*
-plots/
+# Python caches
+__pycache__/
+*.py[cod]
 
-# Exclude older code that I want to keep just in case
-old_code/
+# Editor and OS noise
+.DS_Store
+.idea/
 
-old/*
-old/
+# Archived or scratch directories
+/old_code/
+/old/
+/codebase_v*/
+/tuning_results/
+/rt_util/
 
-codebase_v*
-
-tuning_results/
-
-models/*
-testing/*
-
-
-rt_util/*
-# Local-only
+# Local-only exploratory analysis utilities
 /testing/

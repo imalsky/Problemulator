@@ -25,13 +25,13 @@ class DataNormalizer:
     Handles data normalization with multiple methods and numerical stability.
 
     Supports: standard, log-standard, iqr, log-min-max, max-out,
-    signed-log, scaled_signed_offset_log, symlog, bool, none.
+    signed-log, scaled_signed_offset_log, symlog, bool.
     """
 
     METHODS = {
         "iqr", "log-min-max", "max-out", "signed-log",
         "scaled_signed_offset_log", "symlog", "standard",
-        "log-standard", "bool", "none",
+        "log-standard", "bool",
     }
 
     QUANTILE_METHODS = {"iqr", "symlog"}
@@ -242,7 +242,7 @@ class DataNormalizer:
 
         for key in keys_to_process:
             method = self.key_methods[key]
-            if method in ("none", "bool"):
+            if method == "bool":
                 continue
 
             acc: Dict[str, Any] = {}
@@ -367,7 +367,7 @@ class DataNormalizer:
                 )
 
             if key not in accumulators:
-                if method in ("none", "bool"):
+                if method == "bool":
                     continue
                 raise KeyError(f"No accumulator configured for required key '{key}'.")
 
@@ -457,7 +457,7 @@ class DataNormalizer:
         for key, method in self.key_methods.items():
             stats: Dict[str, Any] = {"method": method, "epsilon": self.eps}
 
-            if method in ("none", "bool"):
+            if method == "bool":
                 final_stats[key] = stats
                 continue
 
@@ -578,7 +578,7 @@ class DataNormalizer:
                 f"normalize_tensor requires a floating-point tensor, got {x.dtype}."
             )
 
-        if method in ("none", "bool") or not stats:
+        if method == "bool" or not stats:
             return x
 
         result = x
@@ -650,7 +650,7 @@ class DataNormalizer:
                 f"denormalize_tensor requires a floating-point tensor, got {x.dtype}."
             )
 
-        if method in ("none", "bool"):
+        if method == "bool":
             return x
 
         if not stats:

@@ -36,7 +36,7 @@ class DevicePrefetchLoader:
         device: torch.device,
         forward_dtype: torch.dtype,
         loss_dtype: torch.dtype,
-    ):
+    ) -> None:
         """
         Initialize prefetch loader.
         
@@ -53,7 +53,14 @@ class DevicePrefetchLoader:
         self.is_cuda = self.device.type == 'cuda'
     
     def __iter__(self):
-        """Iterate with prefetching for CUDA devices."""
+        """
+        Yield batches already moved to ``self.device``.
+
+        Each yielded batch keeps the training contract used throughout the codebase:
+        ``(inputs, masks, targets, target_masks)`` where
+        ``inputs["sequence"]`` is ``[batch, seq_len, input_dim]`` and
+        ``targets`` is ``[batch, seq_len, target_dim]``.
+        """
         if self.is_cuda:
             stream = torch.cuda.Stream()
             first = True
@@ -82,11 +89,21 @@ class DevicePrefetchLoader:
             for batch in self.loader:
                 yield self._to_device(batch)
     
-    def _to_device(self, batch):
+    def _to_device(
+        self,
+        batch: Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor, torch.Tensor],
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         """
         Move batch to target device.
-        
-        Note: Masks remain as boolean tensors (True = padding).
+
+        Args:
+            batch: ``(inputs, masks, targets, target_masks)`` from ``pad_collate``.
+                ``inputs["sequence"]`` has shape ``[batch, seq_len, input_dim]``.
+                ``targets`` has shape ``[batch, seq_len, target_dim]``.
+
+        Returns:
+            The same tuple moved onto ``self.device``. Masks stay boolean with
+            ``True`` meaning padding so they can be used directly by attention and loss code.
         """
         inputs, masks, targets, tgt_masks = batch
         non_blocking = self.is_cuda
@@ -113,7 +130,7 @@ class DevicePrefetchLoader:
         
         return device_inputs, device_masks, device_targets, device_tgt_masks
     
-    def __len__(self):
+    def __len__(self) -> int:
         """Return number of batches."""
         return len(self.loader)
 
@@ -554,11 +571,14 @@ class ModelTrainer:
         Run one epoch of training or validation.
 
         Args:
-            loader: DataLoader for the epoch
+            loader: DataLoader whose batches follow the collate contract
+                ``(inputs, masks, targets, target_masks)`` with
+                ``inputs["sequence"]`` shaped ``[batch, seq_len, input_dim]`` and
+                ``targets`` shaped ``[batch, seq_len, target_dim]``
             is_train: Whether this is a training epoch
             
         Returns:
-            Average loss for the epoch
+            Mean masked MSE over all valid target elements in the epoch
         """
         if len(loader) == 0:
             mode = "training" if is_train else "validation"
@@ -577,7 +597,7 @@ class ModelTrainer:
 
         with grad_context:
             for batch in loader:
-                # Data already on device and casted when using CUDA prefetch loader.
+                # Data already sits on the destination device when the CUDA prefetcher is active.
                 inputs, masks, targets, target_masks = batch
 
                 if self._using_prefetch_loader:
@@ -603,6 +623,9 @@ class ModelTrainer:
                     if predictions.dtype != self.loss_dtype:
                         predictions = predictions.to(dtype=self.loss_dtype)
 
+                    # Loss is computed per element, then reduced only across valid
+                    # non-padding target elements. This keeps right-padding completely
+                    # out of the training objective.
                     unreduced_loss = self.criterion(predictions, targets)
                     valid_steps = ~target_masks
                     valid_step_mask = valid_steps.unsqueeze(-1)

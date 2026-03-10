@@ -440,11 +440,15 @@ class PredictionModel(nn.Module):
     def _init_weights(self) -> None:
         """Initialize weights"""
         for name, module in self.named_modules():
-            # Skip already initialized layers
-            if isinstance(module, (FiLMLayer, DecomposedTransformerEncoderLayer, TransformerBlock)):
-                continue
-
             if isinstance(module, nn.Linear):
+                if (
+                    name == "initial_film.projection"
+                    or name.endswith(".film.projection")
+                    or name.endswith(".transformer.linear1")
+                    or name.endswith(".transformer.linear2")
+                ):
+                    continue
+
                 # Check if this is the final output layer
                 if name == "output_proj.4":
                     # Very small initialization for final regression layer

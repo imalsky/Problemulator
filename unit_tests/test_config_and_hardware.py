@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,8 +15,9 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from generate_splits import _split_pairs
 from hardware import setup_device
-from utils import get_precision_config, validate_config
+from utils import get_precision_config, load_splits, validate_config
 
 
 def _load_checked_in_config() -> dict:
@@ -64,6 +66,89 @@ class ConfigAndHardwareTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "MPS backend does not support float64"):
             get_precision_config(config)
+
+    def test_validate_config_rejects_bfloat16_processed_input_dtype(self) -> None:
+        """Processed shards must stay representable as NumPy float arrays."""
+        config = copy.deepcopy(self.base_config)
+        config["precision"]["input_dtype"] = "bfloat16"
+
+        with self.assertRaisesRegex(ValueError, "precision.input_dtype must be float16"):
+            validate_config(config)
+
+    def test_validate_config_rejects_large_hdf5_chunk_size(self) -> None:
+        """Preprocessing buffer sizing must fail at config-load time."""
+        config = copy.deepcopy(self.base_config)
+        shard_size = config["miscellaneous_settings"]["shard_size"]
+        config["miscellaneous_settings"]["hdf5_read_chunk_size"] = shard_size
+
+        with self.assertRaisesRegex(ValueError, "must be less than"):
+            validate_config(config)
+
+    def test_validate_config_rejects_invalid_split_fractions(self) -> None:
+        """Configured split fractions must be explicit and sum to 1.0."""
+        config = copy.deepcopy(self.base_config)
+        config["data_paths_config"]["dataset_split_fractions"]["test"] = 0.20
+
+        with self.assertRaisesRegex(ValueError, "must sum to 1.0"):
+            validate_config(config)
+
+    def test_split_pairs_uses_configured_fractions(self) -> None:
+        """Split generation should honor the configured train/val/test ratios."""
+        all_pairs = [("file_a", idx) for idx in range(20)]
+
+        splits = _split_pairs(
+            all_pairs,
+            seed=42,
+            split_fractions={"train": 0.5, "validation": 0.25, "test": 0.25},
+        )
+
+        self.assertEqual(len(splits["train"]), 10)
+        self.assertEqual(len(splits["validation"]), 5)
+        self.assertEqual(len(splits["test"]), 5)
+
+    def test_load_splits_rejects_cross_partition_duplicates(self) -> None:
+        """Loaded split files must hard-fail when the same sample appears twice."""
+        config = {
+            "data_paths_config": {
+                "dataset_splits_filename": "dataset_splits.json",
+            }
+        }
+        payload = {
+            "file_stems": ["file_a"],
+            "train": [[0, 0]],
+            "validation": [[0, 0]],
+            "test": [[0, 1]],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            splits_path = Path(tmpdir) / "dataset_splits.json"
+            with splits_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+
+            with self.assertRaisesRegex(ValueError, "must be disjoint"):
+                load_splits(config, Path(tmpdir))
+
+    def test_load_splits_rejects_duplicates_within_split(self) -> None:
+        """Loaded split files must reject repeated samples inside one partition."""
+        config = {
+            "data_paths_config": {
+                "dataset_splits_filename": "dataset_splits.json",
+            }
+        }
+        payload = {
+            "file_stems": ["file_a"],
+            "train": [[0, 0], [0, 0]],
+            "validation": [[0, 1]],
+            "test": [[0, 2]],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            splits_path = Path(tmpdir) / "dataset_splits.json"
+            with splits_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+
+            with self.assertRaisesRegex(ValueError, "Duplicate sample reference"):
+                load_splits(config, Path(tmpdir))
 
     def test_setup_device_cpu_returns_cpu(self) -> None:
         """CPU backend selection should stay explicit and deterministic."""

@@ -19,7 +19,7 @@
     <script src="_static/js/theme.js"></script>
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
-    <link rel="next" title="Workflow" href="workflow.html" />
+    <link rel="next" title="Data Contract" href="data_contract.html" />
     <link rel="prev" title="Problemulator documentation" href="index.html" /> 
 </head>
 
@@ -45,26 +45,68 @@
               <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
 <ul class="current">
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Overview</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#current-modeling-objective">Current modeling objective</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#purpose-and-scope">Purpose and scope</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#scientific-objective">Scientific objective</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#repository-priorities">Repository priorities</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#environment-note">Environment note</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="data_contract.html">Data Contract</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#units-and-physical-conventions">Units and physical conventions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#hdf5-schema">HDF5 schema</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#sequence-length-and-padding">Sequence length and padding</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#split-files">Split files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="configuration.html">Configuration</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#configuration-contract">Configuration contract</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#current-runtime-defaults">Current runtime defaults</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#runtime-control-keys">Runtime control keys</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#precision-policy">Precision policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#normalization-policy">Normalization policy</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="workflow.html">Workflow</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="workflow.html#data-contract">1. Data contract</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#pipeline-stages">Pipeline stages</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#input-validation-and-split-resolution">1. Input validation and split resolution</a></li>
 <li class="toctree-l2"><a class="reference internal" href="workflow.html#preprocessing">2. Preprocessing</a></li>
 <li class="toctree-l2"><a class="reference internal" href="workflow.html#training">3. Training</a></li>
 <li class="toctree-l2"><a class="reference internal" href="workflow.html#evaluation">4. Evaluation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#optimizer-scheduler-and-hardware">Optimizer, scheduler, and hardware</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#artifact-policy">Artifact policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#reproducibility-and-performance">Reproducibility and performance</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="scientific_baseline.html">Scientific Baseline</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#forward-model-assumptions">Forward-model assumptions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#profile-generation-assumptions">Profile-generation assumptions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#chemistry-and-radiative-settings">Chemistry and radiative settings</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#architecture-baseline">Architecture baseline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#model-and-training-defaults">Model and training defaults</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="repository.html">Repository</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="repository.html#src"><code class="docutils literal notranslate"><span class="pre">src/</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="repository.html#config"><code class="docutils literal notranslate"><span class="pre">config/</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="repository.html#unit-tests"><code class="docutils literal notranslate"><span class="pre">unit_tests/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#data-and-models"><code class="docutils literal notranslate"><span class="pre">data/</span></code> and <code class="docutils literal notranslate"><span class="pre">models/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#docs-src-and-docs"><code class="docutils literal notranslate"><span class="pre">docs_src/</span></code> and <code class="docutils literal notranslate"><span class="pre">docs/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#review-boundaries">Review boundaries</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="development.html">Development</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="development.html#execution-environment">Execution environment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="development.html#static-analysis">Static analysis</a></li>
+<li class="toctree-l2"><a class="reference internal" href="development.html#testing-policy">Testing policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="development.html#implementation-checklist">Implementation checklist</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="getting_started.html">Getting Started</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="getting_started.html#default-command">Default command</a></li>
 <li class="toctree-l2"><a class="reference internal" href="getting_started.html#default-configuration">Default configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="getting_started.html#command-line-path-arguments">Command-line path arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="getting_started.html#expected-startup-behavior">Expected startup behavior</a></li>
+<li class="toctree-l2"><a class="reference internal" href="getting_started.html#launcher-note">Launcher note</a></li>
 </ul>
 </li>
 </ul>
@@ -96,27 +138,54 @@
 <h1>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h1>
 <p>Problemulator is designed as a scientific machine learning pipeline for
 profile-to-profile regression in radiative transfer workflows.</p>
-<section id="current-modeling-objective">
-<h2>Current modeling objective<a class="headerlink" href="#current-modeling-objective" title="Link to this heading"></a></h2>
+<section id="purpose-and-scope">
+<h2>Purpose and scope<a class="headerlink" href="#purpose-and-scope" title="Link to this heading"></a></h2>
+<p>The repository is scoped around a single scientific task and a strict runtime
+contract.</p>
+<ul class="simple">
+<li><p>Inputs are layerwise profile variables such as <code class="docutils literal notranslate"><span class="pre">temperature_k</span></code> and
+<code class="docutils literal notranslate"><span class="pre">pressure_bar</span></code>, plus per-profile globals such as <code class="docutils literal notranslate"><span class="pre">orbital_distance_m</span></code>.</p></li>
+<li><p>Outputs are layerwise radiative flux targets such as <code class="docutils literal notranslate"><span class="pre">net_thermal_flux</span></code>
+and <code class="docutils literal notranslate"><span class="pre">net_reflected_flux</span></code>.</p></li>
+<li><p>The current scope prioritizes scientific correctness, clean design, high
+performance, and extension to closely related profile-regression tasks.</p></li>
+<li><p>Production hardening, backward-compatibility shims, and in-the-loop rollout
+workflows are explicitly out of scope.</p></li>
+</ul>
+</section>
+<section id="scientific-objective">
+<h2>Scientific objective<a class="headerlink" href="#scientific-objective" title="Link to this heading"></a></h2>
 <p>The current baseline task is to emulate deterministic radiative transfer
 outputs from one-dimensional atmospheric profiles.</p>
 <ul class="simple">
-<li><p>Inputs include profile variables such as <code class="docutils literal notranslate"><span class="pre">pressure_bar</span></code> and
-<code class="docutils literal notranslate"><span class="pre">temperature_k</span></code>.</p></li>
-<li><p>Global context can also be included, such as <code class="docutils literal notranslate"><span class="pre">orbital_distance_m</span></code>.</p></li>
-<li><p>Outputs are layerwise flux targets including <code class="docutils literal notranslate"><span class="pre">net_thermal_flux</span></code> and
-<code class="docutils literal notranslate"><span class="pre">net_reflected_flux</span></code>.</p></li>
+<li><p>The model learns a mapping from pressure-temperature structure plus global
+context to layerwise thermal and reflected fluxes.</p></li>
+<li><p>The emulation target is a deterministic physical radiative transfer solver
+used to generate the training corpus.</p></li>
+<li><p>The intended use is fast surrogate evaluation in atmospheric modeling
+workflows that would otherwise require repeated radiative transfer solves.</p></li>
 </ul>
 </section>
 <section id="repository-priorities">
 <h2>Repository priorities<a class="headerlink" href="#repository-priorities" title="Link to this heading"></a></h2>
 <p>The repository is organized around a few explicit engineering rules:</p>
 <ul class="simple">
-<li><p>Scientific correctness over convenience behavior.</p></li>
-<li><p>Fail-fast validation when schema or runtime settings are invalid.</p></li>
-<li><p>Explicit configuration for normalization, precision, and training policy.</p></li>
-<li><p>Reproducible preprocessing and training behavior driven by checked-in config.</p></li>
+<li><p>Fail fast on schema mismatch, missing artifacts, invalid configuration,
+invalid values, or unsupported runtime settings.</p></li>
+<li><p>Do not silently skip missing variables or files, and do not substitute
+fallback behavior when required configuration is incomplete.</p></li>
+<li><p>Keep scientifically relevant thresholds, clamping behavior, and precision
+policy explicit in configuration rather than hidden in source.</p></li>
+<li><p>Prefer vectorized implementations and proven library components where they
+simplify the code without weakening correctness.</p></li>
 </ul>
+</section>
+<section id="environment-note">
+<h2>Environment note<a class="headerlink" href="#environment-note" title="Link to this heading"></a></h2>
+<p>The current setup includes one explicit runtime exception in the entrypoint:
+<code class="docutils literal notranslate"><span class="pre">KMP_DUPLICATE_LIB_OK=TRUE</span></code> is set before importing PyTorch. This is a
+documented environment constraint for the checked-in runtime setup, not a
+general fallback policy.</p>
 </section>
 </section>
 
@@ -125,7 +194,7 @@ outputs from one-dimensional atmospheric profiles.</p>
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
         <a href="index.html" class="btn btn-neutral float-left" title="Problemulator documentation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="workflow.html" class="btn btn-neutral float-right" title="Workflow" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="data_contract.html" class="btn btn-neutral float-right" title="Data Contract" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 
   <hr/>

@@ -3,9 +3,10 @@
 <!DOCTYPE html>
 <html class="writer-html5" lang="en" data-content_root="./">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Index &mdash; Problemulator documentation</title>
+  <title>Data Contract &mdash; Problemulator documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
 
@@ -16,8 +17,10 @@
       <script src="_static/doctools.js?v=fd6eb6e6"></script>
       <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/js/theme.js"></script>
-    <link rel="index" title="Index" href="#" />
-    <link rel="search" title="Search" href="search.html" /> 
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Configuration" href="configuration.html" />
+    <link rel="prev" title="Overview" href="overview.html" /> 
 </head>
 
 <body class="wy-body-for-nav"> 
@@ -40,7 +43,7 @@
 </div>
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
-<ul>
+<ul class="current">
 <li class="toctree-l1"><a class="reference internal" href="overview.html">Overview</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="overview.html#purpose-and-scope">Purpose and scope</a></li>
 <li class="toctree-l2"><a class="reference internal" href="overview.html#scientific-objective">Scientific objective</a></li>
@@ -48,11 +51,11 @@
 <li class="toctree-l2"><a class="reference internal" href="overview.html#environment-note">Environment note</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="data_contract.html">Data Contract</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="data_contract.html#units-and-physical-conventions">Units and physical conventions</a></li>
-<li class="toctree-l2"><a class="reference internal" href="data_contract.html#hdf5-schema">HDF5 schema</a></li>
-<li class="toctree-l2"><a class="reference internal" href="data_contract.html#sequence-length-and-padding">Sequence length and padding</a></li>
-<li class="toctree-l2"><a class="reference internal" href="data_contract.html#split-files">Split files</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Data Contract</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#units-and-physical-conventions">Units and physical conventions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#hdf5-schema">HDF5 schema</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#sequence-length-and-padding">Sequence length and padding</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#split-files">Split files</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="configuration.html">Configuration</a><ul>
@@ -122,7 +125,7 @@
           <div role="navigation" aria-label="Page navigation">
   <ul class="wy-breadcrumbs">
       <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
-      <li class="breadcrumb-item active">Index</li>
+      <li class="breadcrumb-item active">Data Contract</li>
       <li class="wy-breadcrumbs-aside">
       </li>
   </ul>
@@ -131,17 +134,115 @@
           <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
            <div itemprop="articleBody">
              
-
-<h1 id="index">Index</h1>
-
-<div class="genindex-jumpbox">
- 
-</div>
+  <section id="data-contract">
+<h1>Data Contract<a class="headerlink" href="#data-contract" title="Link to this heading"></a></h1>
+<p>The repository treats data schema and processed artifacts as part of the core
+runtime contract. Missing files, missing keys, invalid values, or unexpected
+shapes are hard failures.</p>
+<section id="units-and-physical-conventions">
+<h2>Units and physical conventions<a class="headerlink" href="#units-and-physical-conventions" title="Link to this heading"></a></h2>
+<p>The baseline unit system is CGS where practical, with variable semantics
+anchored to the current dataset naming and checked-in configuration.</p>
+<table class="docutils align-default" id="id1">
+<caption><span class="caption-text">Canonical baseline variables</span><a class="headerlink" href="#id1" title="Link to this table"></a></caption>
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Role</p></th>
+<th class="head"><p>Unit</p></th>
+<th class="head"><p>Constraint</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">pressure_bar</span></code></p></td>
+<td><p>Profile input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">bar</span></code></p></td>
+<td><p>Strictly positive</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">temperature_k</span></code></p></td>
+<td><p>Profile input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">K</span></code></p></td>
+<td><p>Strictly positive</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">orbital_distance_m</span></code></p></td>
+<td><p>Global input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">m</span></code></p></td>
+<td><p>Strictly positive</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">net_thermal_flux</span></code></p></td>
+<td><p>Layerwise target</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">erg</span> <span class="pre">cm^-2</span> <span class="pre">s^-1</span></code></p></td>
+<td><p>Signed values allowed</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">net_reflected_flux</span></code></p></td>
+<td><p>Layerwise target</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">erg</span> <span class="pre">cm^-2</span> <span class="pre">s^-1</span></code></p></td>
+<td><p>Signed values allowed</p></td>
+</tr>
+</tbody>
+</table>
+<p>Unit handling rules are explicit:</p>
+<ul class="simple">
+<li><p>No implicit unit conversion is allowed.</p></li>
+<li><p>Any conversion must be explicit, configurable, and auditable.</p></li>
+<li><p>Variable-level unit metadata must exist in configuration.</p></li>
+<li><p>No additional hard physics-informed training constraints are applied unless
+they are explicitly added later.</p></li>
+</ul>
+</section>
+<section id="hdf5-schema">
+<h2>HDF5 schema<a class="headerlink" href="#hdf5-schema" title="Link to this heading"></a></h2>
+<p>The current HDF5 schema is the canonical input format.</p>
+<ul class="simple">
+<li><p>Required keys must exist exactly as configured.</p></li>
+<li><p>Missing files or keys are hard failures.</p></li>
+<li><p>Profile variables for a given file must share a common shape <code class="docutils literal notranslate"><span class="pre">[N,</span> <span class="pre">L]</span></code>.</p></li>
+<li><p>Global variables must share the same leading sample dimension <code class="docutils literal notranslate"><span class="pre">N</span></code>.</p></li>
+<li><p>NaN or Inf values in required data are hard failures during every stage,
+including statistics collection.</p></li>
+</ul>
+</section>
+<section id="sequence-length-and-padding">
+<h2>Sequence length and padding<a class="headerlink" href="#sequence-length-and-padding" title="Link to this heading"></a></h2>
+<p>Sequence handling is explicit and deterministic.</p>
+<ul class="simple">
+<li><p>If <code class="docutils literal notranslate"><span class="pre">L</span> <span class="pre">&gt;</span> <span class="pre">max_sequence_length</span></code>, preprocessing fails immediately.</p></li>
+<li><p>If <code class="docutils literal notranslate"><span class="pre">L</span> <span class="pre">&lt;</span> <span class="pre">max_sequence_length</span></code>, sequences are right-padded up to the maximum.</p></li>
+<li><p>Padding uses a numeric sentinel together with a boolean mask.</p></li>
+<li><p>Mask semantics are <code class="docutils literal notranslate"><span class="pre">True</span> <span class="pre">==</span> <span class="pre">padding</span></code> and <code class="docutils literal notranslate"><span class="pre">False</span> <span class="pre">==</span> <span class="pre">valid</span></code>.</p></li>
+<li><p>If the sentinel value appears naturally in non-padding data, preprocessing
+fails immediately.</p></li>
+<li><p>Sentinel checks use absolute tolerance only through
+<code class="docutils literal notranslate"><span class="pre">padding_comparison_epsilon</span></code>.</p></li>
+</ul>
+</section>
+<section id="split-files">
+<h2>Split files<a class="headerlink" href="#split-files" title="Link to this heading"></a></h2>
+<p>The split file is a required runtime artifact.</p>
+<ul class="simple">
+<li><p>If the configured split file is missing, <code class="docutils literal notranslate"><span class="pre">src/main.py</span></code> auto-generates it
+before preprocessing using the configured raw HDF5 files.</p></li>
+<li><p>Auto-generated splits are deterministic from
+<code class="docutils literal notranslate"><span class="pre">miscellaneous_settings.random_seed</span></code>.</p></li>
+<li><p>Manual generation through <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">src/generate_splits.py</span></code> remains supported.</p></li>
+<li><p>Only the compact canonical <code class="docutils literal notranslate"><span class="pre">file_stems</span></code> format is allowed.</p></li>
+<li><p>Malformed split files or alternate legacy formats are hard failures.</p></li>
+</ul>
+<p>The checked-in baseline split fractions are:</p>
+<ul class="simple">
+<li><p>Train: 70%</p></li>
+<li><p>Validation: 15%</p></li>
+<li><p>Test: 15%</p></li>
+</ul>
+</section>
+</section>
 
 
            </div>
           </div>
-          <footer>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="overview.html" class="btn btn-neutral float-left" title="Overview" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="configuration.html" class="btn btn-neutral float-right" title="Configuration" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
 
   <hr/>
 

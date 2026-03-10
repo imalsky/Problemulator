@@ -44,26 +44,68 @@
               <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="overview.html">Overview</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="overview.html#current-modeling-objective">Current modeling objective</a></li>
+<li class="toctree-l2"><a class="reference internal" href="overview.html#purpose-and-scope">Purpose and scope</a></li>
+<li class="toctree-l2"><a class="reference internal" href="overview.html#scientific-objective">Scientific objective</a></li>
 <li class="toctree-l2"><a class="reference internal" href="overview.html#repository-priorities">Repository priorities</a></li>
+<li class="toctree-l2"><a class="reference internal" href="overview.html#environment-note">Environment note</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="data_contract.html">Data Contract</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#units-and-physical-conventions">Units and physical conventions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#hdf5-schema">HDF5 schema</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#sequence-length-and-padding">Sequence length and padding</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#split-files">Split files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="configuration.html">Configuration</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#configuration-contract">Configuration contract</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#current-runtime-defaults">Current runtime defaults</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#runtime-control-keys">Runtime control keys</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#precision-policy">Precision policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#normalization-policy">Normalization policy</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="workflow.html">Workflow</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="workflow.html#data-contract">1. Data contract</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#pipeline-stages">Pipeline stages</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#input-validation-and-split-resolution">1. Input validation and split resolution</a></li>
 <li class="toctree-l2"><a class="reference internal" href="workflow.html#preprocessing">2. Preprocessing</a></li>
 <li class="toctree-l2"><a class="reference internal" href="workflow.html#training">3. Training</a></li>
 <li class="toctree-l2"><a class="reference internal" href="workflow.html#evaluation">4. Evaluation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#optimizer-scheduler-and-hardware">Optimizer, scheduler, and hardware</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#artifact-policy">Artifact policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#reproducibility-and-performance">Reproducibility and performance</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="scientific_baseline.html">Scientific Baseline</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#forward-model-assumptions">Forward-model assumptions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#profile-generation-assumptions">Profile-generation assumptions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#chemistry-and-radiative-settings">Chemistry and radiative settings</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#architecture-baseline">Architecture baseline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#model-and-training-defaults">Model and training defaults</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="repository.html">Repository</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="repository.html#src"><code class="docutils literal notranslate"><span class="pre">src/</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="repository.html#config"><code class="docutils literal notranslate"><span class="pre">config/</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="repository.html#unit-tests"><code class="docutils literal notranslate"><span class="pre">unit_tests/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#data-and-models"><code class="docutils literal notranslate"><span class="pre">data/</span></code> and <code class="docutils literal notranslate"><span class="pre">models/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#docs-src-and-docs"><code class="docutils literal notranslate"><span class="pre">docs_src/</span></code> and <code class="docutils literal notranslate"><span class="pre">docs/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#review-boundaries">Review boundaries</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="development.html">Development</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="development.html#execution-environment">Execution environment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="development.html#static-analysis">Static analysis</a></li>
+<li class="toctree-l2"><a class="reference internal" href="development.html#testing-policy">Testing policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="development.html#implementation-checklist">Implementation checklist</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="getting_started.html">Getting Started</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="getting_started.html#default-command">Default command</a></li>
 <li class="toctree-l2"><a class="reference internal" href="getting_started.html#default-configuration">Default configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="getting_started.html#command-line-path-arguments">Command-line path arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="getting_started.html#expected-startup-behavior">Expected startup behavior</a></li>
+<li class="toctree-l2"><a class="reference internal" href="getting_started.html#launcher-note">Launcher note</a></li>
 </ul>
 </li>
 </ul>
@@ -97,30 +139,75 @@
 profiles. The project learns a mapping from atmospheric state inputs to
 layerwise radiative flux outputs, with the repository centered on explicit
 configuration, fail-fast validation, and reproducible training behavior.</p>
+<p>This documentation summarizes the checked-in repository contracts from
+<code class="docutils literal notranslate"><span class="pre">spec.md</span></code> and the active defaults in <code class="docutils literal notranslate"><span class="pre">config/config.jsonc</span></code>. The spec file
+remains the more exhaustive source for implementation requirements.</p>
 <div class="toctree-wrapper compound">
 <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="overview.html">Overview</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="overview.html#current-modeling-objective">Current modeling objective</a></li>
+<li class="toctree-l2"><a class="reference internal" href="overview.html#purpose-and-scope">Purpose and scope</a></li>
+<li class="toctree-l2"><a class="reference internal" href="overview.html#scientific-objective">Scientific objective</a></li>
 <li class="toctree-l2"><a class="reference internal" href="overview.html#repository-priorities">Repository priorities</a></li>
+<li class="toctree-l2"><a class="reference internal" href="overview.html#environment-note">Environment note</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="data_contract.html">Data Contract</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#units-and-physical-conventions">Units and physical conventions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#hdf5-schema">HDF5 schema</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#sequence-length-and-padding">Sequence length and padding</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#split-files">Split files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="configuration.html">Configuration</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#configuration-contract">Configuration contract</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#current-runtime-defaults">Current runtime defaults</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#runtime-control-keys">Runtime control keys</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#precision-policy">Precision policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#normalization-policy">Normalization policy</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="workflow.html">Workflow</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="workflow.html#data-contract">1. Data contract</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#pipeline-stages">Pipeline stages</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#input-validation-and-split-resolution">1. Input validation and split resolution</a></li>
 <li class="toctree-l2"><a class="reference internal" href="workflow.html#preprocessing">2. Preprocessing</a></li>
 <li class="toctree-l2"><a class="reference internal" href="workflow.html#training">3. Training</a></li>
 <li class="toctree-l2"><a class="reference internal" href="workflow.html#evaluation">4. Evaluation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#optimizer-scheduler-and-hardware">Optimizer, scheduler, and hardware</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#artifact-policy">Artifact policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="workflow.html#reproducibility-and-performance">Reproducibility and performance</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="scientific_baseline.html">Scientific Baseline</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#forward-model-assumptions">Forward-model assumptions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#profile-generation-assumptions">Profile-generation assumptions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#chemistry-and-radiative-settings">Chemistry and radiative settings</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#architecture-baseline">Architecture baseline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#model-and-training-defaults">Model and training defaults</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="repository.html">Repository</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="repository.html#src"><code class="docutils literal notranslate"><span class="pre">src/</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="repository.html#config"><code class="docutils literal notranslate"><span class="pre">config/</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="repository.html#unit-tests"><code class="docutils literal notranslate"><span class="pre">unit_tests/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#data-and-models"><code class="docutils literal notranslate"><span class="pre">data/</span></code> and <code class="docutils literal notranslate"><span class="pre">models/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#docs-src-and-docs"><code class="docutils literal notranslate"><span class="pre">docs_src/</span></code> and <code class="docutils literal notranslate"><span class="pre">docs/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#review-boundaries">Review boundaries</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="development.html">Development</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="development.html#execution-environment">Execution environment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="development.html#static-analysis">Static analysis</a></li>
+<li class="toctree-l2"><a class="reference internal" href="development.html#testing-policy">Testing policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="development.html#implementation-checklist">Implementation checklist</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="getting_started.html">Getting Started</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="getting_started.html#default-command">Default command</a></li>
 <li class="toctree-l2"><a class="reference internal" href="getting_started.html#default-configuration">Default configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="getting_started.html#command-line-path-arguments">Command-line path arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="getting_started.html#expected-startup-behavior">Expected startup behavior</a></li>
+<li class="toctree-l2"><a class="reference internal" href="getting_started.html#launcher-note">Launcher note</a></li>
 </ul>
 </li>
 </ul>

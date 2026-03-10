@@ -19,10 +19,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.jsonc"
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
 
-TRAIN_FRACTION = 0.70
-VALIDATION_FRACTION = 0.15
-TEST_FRACTION = 0.15
-
 logger = logging.getLogger(__name__)
 
 
@@ -105,13 +101,15 @@ def _build_all_pairs(raw_hdf5_paths: List[Path], profile_key: str) -> List[Tuple
 
 def _split_pairs(
     all_pairs: List[Tuple[str, int]],
+    *,
     seed: int,
+    split_fractions: Dict[str, float],
 ) -> Dict[str, List[Tuple[str, int]]]:
     """Shuffle all pairs with a fixed seed and split into train/validation/test."""
     if not all_pairs:
         raise ValueError("No sample pairs found; cannot generate splits.")
 
-    ratio_sum = TRAIN_FRACTION + VALIDATION_FRACTION + TEST_FRACTION
+    ratio_sum = sum(float(split_fractions[name]) for name in ("train", "validation", "test"))
     if abs(ratio_sum - 1.0) > 1e-12:
         raise RuntimeError(f"Split fractions must sum to 1.0, got {ratio_sum}.")
 
@@ -119,8 +117,8 @@ def _split_pairs(
     rng = np.random.default_rng(seed)
     shuffled = [all_pairs[i] for i in rng.permutation(n_total)]
 
-    n_train = int(n_total * TRAIN_FRACTION)
-    n_validation = int(n_total * VALIDATION_FRACTION)
+    n_train = int(n_total * float(split_fractions["train"]))
+    n_validation = int(n_total * float(split_fractions["validation"]))
     n_test = n_total - n_train - n_validation
 
     if min(n_train, n_validation, n_test) <= 0:
@@ -165,6 +163,10 @@ def generate_splits_from_config(
     seed = int(config["miscellaneous_settings"]["random_seed"])
     if seed_override is not None:
         seed = int(seed_override)
+    split_fractions = {
+        name: float(config["data_paths_config"]["dataset_split_fractions"][name])
+        for name in ("train", "validation", "test")
+    }
 
     splits_filename = get_config_str(
         config, "data_paths_config", "dataset_splits_filename", "dataset splits"
@@ -174,7 +176,7 @@ def generate_splits_from_config(
 
     logger.info("Building splits from %d raw files with seed=%d", len(raw_hdf5_paths), seed)
     all_pairs = _build_all_pairs(raw_hdf5_paths, profile_key)
-    splits = _split_pairs(all_pairs, seed=seed)
+    splits = _split_pairs(all_pairs, seed=seed, split_fractions=split_fractions)
 
     compact_splits = compress_splits(splits)
     if not save_json(compact_splits, output_path, compact=True):

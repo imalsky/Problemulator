@@ -20,7 +20,12 @@
     "hdf5_dataset_filename": [
       "picaso_results_1.h5"
     ],
-    "dataset_splits_filename": "dataset_splits.json"
+    "dataset_splits_filename": "dataset_splits.json",
+    "dataset_split_fractions": {
+      "train": 0.7,
+      "validation": 0.15,
+      "test": 0.15
+    }
   },
   "data_specification": {
     "input_variables": [

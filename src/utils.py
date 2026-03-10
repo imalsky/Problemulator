@@ -312,6 +312,43 @@ def validate_config(config: Dict[str, Any]) -> None:
             raise ValueError(f"Config key '{key}' cannot be empty.")
         return value
 
+    def require_split_fractions(section: Dict[str, Any], key: str) -> Dict[str, float]:
+        value = section.get(key)
+        if not isinstance(value, dict):
+            raise ValueError(f"Config key '{key}' must be a dictionary.")
+
+        missing_keys = REQUIRED_SPLIT_KEYS - set(value.keys())
+        if missing_keys:
+            raise ValueError(
+                f"Missing keys in '{key}': {sorted(missing_keys)}"
+            )
+
+        unknown_keys = set(value.keys()) - REQUIRED_SPLIT_KEYS
+        if unknown_keys:
+            raise ValueError(
+                f"Unknown keys in '{key}': {sorted(unknown_keys)}"
+            )
+
+        split_fractions: Dict[str, float] = {}
+        for split_name in ("train", "validation", "test"):
+            fraction = value[split_name]
+            if not isinstance(fraction, (int, float)):
+                raise ValueError(
+                    f"Split fraction '{key}.{split_name}' must be numeric."
+                )
+
+            fraction_f = float(fraction)
+            if not (0.0 < fraction_f < 1.0):
+                raise ValueError(
+                    f"Split fraction '{key}.{split_name}' must be in (0, 1)."
+                )
+            split_fractions[split_name] = fraction_f
+
+        if abs(sum(split_fractions.values()) - 1.0) > 1e-12:
+            raise ValueError(f"Split fractions in '{key}' must sum to 1.0.")
+
+        return split_fractions
+
     # data_paths_config
     data_paths = require_section("data_paths_config")
     h5_list = require_list_of_str(data_paths, "hdf5_dataset_filename")
@@ -320,6 +357,7 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError(
             "Config key 'data_paths_config.dataset_splits_filename' must be a non-empty string."
         )
+    require_split_fractions(data_paths, "dataset_split_fractions")
     if not h5_list:
         raise ValueError("Config key 'hdf5_dataset_filename' cannot be empty.")
 
@@ -667,6 +705,11 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError(
             "'miscellaneous_settings.hdf5_read_chunk_size' must be a positive integer."
         )
+    if misc["hdf5_read_chunk_size"] >= misc["shard_size"]:
+        raise ValueError(
+            "'miscellaneous_settings.hdf5_read_chunk_size' must be less than "
+            "'miscellaneous_settings.shard_size'."
+        )
 
     if not isinstance(misc["torch_compile"], bool):
         raise ValueError("'miscellaneous_settings.torch_compile' must be a boolean.")
@@ -727,7 +770,12 @@ def validate_config(config: Dict[str, Any]) -> None:
         )
 
     # Validate precision combinations now that training params are known.
-    get_precision_config(config)
+    precision_cfg = get_precision_config(config)
+    if precision_cfg["input_dtype"] not in (torch.float16, torch.float32, torch.float64):
+        raise ValueError(
+            "precision.input_dtype must be float16, float32, or float64 so "
+            "processed shards can be written as NumPy arrays."
+        )
 
     # output_paths_config
     output_paths = require_section("output_paths_config")
@@ -910,11 +958,15 @@ def load_splits(
     file_stems = loaded_data["file_stems"]
     if not isinstance(file_stems, list) or not all(isinstance(s, str) and s for s in file_stems):
         raise ValueError("'file_stems' must be a list of non-empty strings.")
+    if len(file_stems) != len(set(file_stems)):
+        raise ValueError("'file_stems' must not contain duplicates.")
 
+    seen_items: Dict[Tuple[int, int], str] = {}
     for split_name in ("train", "validation", "test"):
         items = loaded_data[split_name]
         if not isinstance(items, list) or len(items) == 0:
             raise ValueError(f"Split '{split_name}' must be a non-empty list.")
+        split_seen: set[Tuple[int, int]] = set()
         for item in items:
             if (
                 not isinstance(item, list)
@@ -930,6 +982,24 @@ def load_splits(
                 raise ValueError(f"Invalid file_stem index {item[0]} in split '{split_name}'.")
             if item[1] < 0:
                 raise ValueError(f"Negative sample index {item[1]} in split '{split_name}'.")
+
+            sample_ref = (item[0], item[1])
+            if sample_ref in split_seen:
+                raise ValueError(
+                    f"Duplicate sample reference in split '{split_name}': "
+                    f"({file_stems[item[0]]}, {item[1]})."
+                )
+
+            previous_split = seen_items.get(sample_ref)
+            if previous_split is not None:
+                raise ValueError(
+                    "Split partitions must be disjoint; sample "
+                    f"({file_stems[item[0]]}, {item[1]}) appears in both "
+                    f"'{previous_split}' and '{split_name}'."
+                )
+
+            split_seen.add(sample_ref)
+            seen_items[sample_ref] = split_name
 
     splits = decompress_splits(loaded_data)
 

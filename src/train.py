@@ -5,7 +5,7 @@ import gc
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 from torch import nn, optim
 from torch.amp import GradScaler, autocast
@@ -474,23 +474,29 @@ class ModelTrainer:
         
         for epoch in range(1, epochs + 1):
             epoch_start = time.time()
+            epoch_lr = float(self.optimizer.param_groups[0]["lr"])
             
             # Training epoch
             train_loss = self._run_epoch(self.train_loader, is_train=True)
             
             # Validation epoch
             val_loss = self._run_epoch(self.val_loader, is_train=False)
-            
-            self.scheduler.step()
-            
-            # Calculate improvement and log results
-            improvement = self.best_val_loss - val_loss
+
+            previous_best_val = self.best_val_loss
+            improvement: Optional[float] = None
+            if previous_best_val != float("inf"):
+                improvement = previous_best_val - val_loss
             self._log_epoch_results(
-                epoch, train_loss, val_loss, time.time() - epoch_start, improvement
+                epoch,
+                train_loss,
+                val_loss,
+                time.time() - epoch_start,
+                improvement,
+                epoch_lr,
             )
             
             # Check for improvement and early stopping
-            if val_loss < self.best_val_loss - min_delta:
+            if val_loss < previous_best_val - min_delta:
                 # Improvement found
                 self.best_val_loss = val_loss
                 self.best_epoch = epoch
@@ -506,6 +512,8 @@ class ModelTrainer:
                         f"without improvement."
                     )
                     break
+
+            self.scheduler.step()
         
         logger.info(
             f"Training complete. Best val_loss={self.best_val_loss:.4e} "
@@ -672,11 +680,10 @@ class ModelTrainer:
         train_loss: float,
         val_loss: float,
         elapsed_time: float,
-        improvement: float,
+        improvement: Optional[float],
+        lr: float,
     ) -> None:
         """Log epoch results to console and file."""
-        lr = self.optimizer.param_groups[0]["lr"]
-        
         # Console log
         msg = (
             f"Epoch {epoch:03d}  "
@@ -686,16 +693,17 @@ class ModelTrainer:
             f"time:{elapsed_time:.1f}s"
         )
         
-        if improvement > 0:
+        if improvement is not None and improvement > 0:
             msg += f"  ↓{improvement:.3e}"
         
         logger.info(msg)
         
         # File log
+        improvement_str = "" if improvement is None else f"{improvement:.6e}"
         with self.log_path.open("a") as f:
             f.write(
                 f"{epoch},{train_loss:.6e},{val_loss:.6e},"
-                f"{lr:.6e},{elapsed_time:.1f},{improvement:.6e}\n"
+                f"{lr:.6e},{elapsed_time:.1f},{improvement_str}\n"
             )
     
     def _save_best_model(self) -> None:

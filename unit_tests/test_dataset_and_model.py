@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -132,6 +133,35 @@ class DatasetAndModelTests(unittest.TestCase):
         output = model(sequence, global_features=global_features, sequence_mask=sequence_mask)
 
         self.assertEqual(tuple(output.shape), (2, 4, 3))
+
+    def test_prediction_model_preserves_custom_linear_initialization(self) -> None:
+        """FiLM and transformer feed-forward layers should keep their explicit init."""
+        torch.manual_seed(0)
+        model = PredictionModel(
+            input_dim=8,
+            global_input_dim=4,
+            output_dim=2,
+            d_model=32,
+            nhead=4,
+            num_encoder_layers=1,
+            dim_feedforward=64,
+            dropout=0.0,
+            attention_dropout=0.0,
+            max_sequence_length=16,
+            film_clamp=2.0,
+            output_head_divisor=2,
+            output_head_dropout_factor=0.5,
+        )
+
+        film_weight = model.initial_film.projection.weight.detach()
+        fan_out, fan_in = film_weight.shape
+        film_limit = 0.1 * math.sqrt(6.0 / float(fan_in + fan_out))
+        self.assertLessEqual(float(film_weight.abs().max()), film_limit + 1e-6)
+
+        linear1_weight = model.blocks[0].transformer.linear1.weight.detach()
+        linear2_weight = model.blocks[0].transformer.linear2.weight.detach()
+        self.assertGreater(float(linear1_weight.abs().max()), 0.1)
+        self.assertGreater(float(linear2_weight.abs().max()), 0.1)
 
 
 if __name__ == "__main__":

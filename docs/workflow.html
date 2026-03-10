@@ -6,7 +6,7 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Problemulator documentation &mdash; Problemulator documentation</title>
+  <title>Workflow &mdash; Problemulator documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
 
@@ -19,7 +19,8 @@
     <script src="_static/js/theme.js"></script>
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
-    <link rel="next" title="Overview" href="overview.html" /> 
+    <link rel="next" title="Repository" href="repository.html" />
+    <link rel="prev" title="Overview" href="overview.html" /> 
 </head>
 
 <body class="wy-body-for-nav"> 
@@ -30,7 +31,7 @@
 
           
           
-          <a href="#" class="icon icon-home">
+          <a href="index.html" class="icon icon-home">
             Problemulator
           </a>
 <div role="search">
@@ -42,17 +43,17 @@
 </div>
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
-<ul>
+<ul class="current">
 <li class="toctree-l1"><a class="reference internal" href="overview.html">Overview</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="overview.html#current-modeling-objective">Current modeling objective</a></li>
 <li class="toctree-l2"><a class="reference internal" href="overview.html#repository-priorities">Repository priorities</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="workflow.html">Workflow</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="workflow.html#data-contract">1. Data contract</a></li>
-<li class="toctree-l2"><a class="reference internal" href="workflow.html#preprocessing">2. Preprocessing</a></li>
-<li class="toctree-l2"><a class="reference internal" href="workflow.html#training">3. Training</a></li>
-<li class="toctree-l2"><a class="reference internal" href="workflow.html#evaluation">4. Evaluation</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Workflow</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#data-contract">1. Data contract</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#preprocessing">2. Preprocessing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#training">3. Training</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#evaluation">4. Evaluation</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="repository.html">Repository</a><ul>
@@ -74,15 +75,15 @@
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
           <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-          <a href="#">Problemulator</a>
+          <a href="index.html">Problemulator</a>
       </nav>
 
       <div class="wy-nav-content">
         <div class="rst-content">
           <div role="navigation" aria-label="Page navigation">
   <ul class="wy-breadcrumbs">
-      <li><a href="#" class="icon icon-home" aria-label="Home"></a></li>
-      <li class="breadcrumb-item active">Problemulator documentation</li>
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Workflow</li>
       <li class="wy-breadcrumbs-aside">
       </li>
   </ul>
@@ -91,47 +92,39 @@
           <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
            <div itemprop="articleBody">
              
-  <section id="problemulator-documentation">
-<h1>Problemulator documentation<a class="headerlink" href="#problemulator-documentation" title="Link to this heading"></a></h1>
-<p>Problemulator is a scientific emulator for one-dimensional radiative transfer
-profiles. The project learns a mapping from atmospheric state inputs to
-layerwise radiative flux outputs, with the repository centered on explicit
-configuration, fail-fast validation, and reproducible training behavior.</p>
-<div class="toctree-wrapper compound">
-<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
-<ul>
-<li class="toctree-l1"><a class="reference internal" href="overview.html">Overview</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="overview.html#current-modeling-objective">Current modeling objective</a></li>
-<li class="toctree-l2"><a class="reference internal" href="overview.html#repository-priorities">Repository priorities</a></li>
-</ul>
-</li>
-<li class="toctree-l1"><a class="reference internal" href="workflow.html">Workflow</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="workflow.html#data-contract">1. Data contract</a></li>
-<li class="toctree-l2"><a class="reference internal" href="workflow.html#preprocessing">2. Preprocessing</a></li>
-<li class="toctree-l2"><a class="reference internal" href="workflow.html#training">3. Training</a></li>
-<li class="toctree-l2"><a class="reference internal" href="workflow.html#evaluation">4. Evaluation</a></li>
-</ul>
-</li>
-<li class="toctree-l1"><a class="reference internal" href="repository.html">Repository</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="repository.html#src"><code class="docutils literal notranslate"><span class="pre">src/</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="repository.html#config"><code class="docutils literal notranslate"><span class="pre">config/</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="repository.html#unit-tests"><code class="docutils literal notranslate"><span class="pre">unit_tests/</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l1"><a class="reference internal" href="getting_started.html">Getting Started</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="getting_started.html#default-command">Default command</a></li>
-<li class="toctree-l2"><a class="reference internal" href="getting_started.html#default-configuration">Default configuration</a></li>
-</ul>
-</li>
-</ul>
-</div>
+  <section id="workflow">
+<h1>Workflow<a class="headerlink" href="#workflow" title="Link to this heading"></a></h1>
+<p>The main pipeline moves from raw HDF5 inputs to processed artifacts and then to
+trained checkpoints.</p>
+<section id="data-contract">
+<h2>1. Data contract<a class="headerlink" href="#data-contract" title="Link to this heading"></a></h2>
+<p>Raw HDF5 inputs are treated as the canonical source of truth. Required keys,
+shapes, and non-finite value checks are validated before later stages proceed.</p>
+</section>
+<section id="preprocessing">
+<h2>2. Preprocessing<a class="headerlink" href="#preprocessing" title="Link to this heading"></a></h2>
+<p>The preprocessing stage prepares dataset splits, normalization metadata,
+padding-aware tensors, and processed shard outputs according to the active
+configuration.</p>
+</section>
+<section id="training">
+<h2>3. Training<a class="headerlink" href="#training" title="Link to this heading"></a></h2>
+<p>The training pipeline uses explicit precision settings, deterministic seeding,
+configured hardware setup, and a transformer-based model implementation.</p>
+</section>
+<section id="evaluation">
+<h2>4. Evaluation<a class="headerlink" href="#evaluation" title="Link to this heading"></a></h2>
+<p>Training produces checkpoints, logs, metadata, and immediate held-out test
+metrics so the repository retains a simple post-fit summary of performance.</p>
+</section>
 </section>
 
 
            </div>
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
-        <a href="overview.html" class="btn btn-neutral float-right" title="Overview" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="overview.html" class="btn btn-neutral float-left" title="Overview" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="repository.html" class="btn btn-neutral float-right" title="Repository" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 
   <hr/>

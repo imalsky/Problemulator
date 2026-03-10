@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Problemulator</title>
+  <meta
+    name="description"
+    content="Problemulator is a scientific emulator for one-dimensional radiative transfer profiles."
+  >
+  <link rel="stylesheet" type="text/css" href="assets/site.css">
+</head>
+<body>
+  <div class="page-shell">
+    <div class="hero">
+      <p class="eyebrow">Scientific ML for Radiative Transfer</p>
+      <h1>Problemulator</h1>
+      <p class="hero-copy">
+        Problemulator is a radiative-transfer emulator that learns a mapping from
+        one-dimensional atmospheric structure to layerwise flux outputs. The
+        repository focuses on scientific correctness, strict configuration, and a
+        reproducible preprocessing-to-training pipeline.
+      </p>
+      <div class="hero-actions">
+        <a class="button button-primary" href="#workflow">View Workflow</a>
+        <a class="button button-secondary" href="#getting-started">Get Started</a>
+      </div>
+    </div>
+
+    <div class="main-content">
+      <div class="section-card" id="overview">
+        <div class="section-heading">
+          <p class="section-label">Overview</p>
+          <h2>What this project models</h2>
+        </div>
+        <div class="two-column">
+          <div>
+            <p>
+              The current objective is to emulate deterministic radiative transfer
+              outputs from atmospheric profiles. Inputs include profile variables
+              such as pressure and temperature, along with global context such as
+              orbital distance.
+            </p>
+          </div>
+          <div>
+            <p>
+              Outputs are layerwise radiative quantities, including net thermal and
+              reflected flux. The implementation is organized around fail-fast data
+              validation, explicit normalization policy, and reproducible training.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-card" id="workflow">
+        <div class="section-heading">
+          <p class="section-label">Workflow</p>
+          <h2>From raw profiles to trained checkpoints</h2>
+        </div>
+        <div class="grid">
+          <div class="info-card">
+            <h3>1. Data contract</h3>
+            <p>
+              Raw HDF5 inputs are treated as the canonical source. Required keys,
+              shapes, and finite values are validated before the pipeline proceeds.
+            </p>
+          </div>
+          <div class="info-card">
+            <h3>2. Preprocessing</h3>
+            <p>
+              Dataset splits, normalization metadata, padding masks, and processed
+              shards are prepared according to the checked-in configuration.
+            </p>
+          </div>
+          <div class="info-card">
+            <h3>3. Training</h3>
+            <p>
+              The configured training pipeline uses explicit precision settings,
+              deterministic seeding, and a transformer-based model trained on valid
+              non-padding targets.
+            </p>
+          </div>
+          <div class="info-card">
+            <h3>4. Evaluation</h3>
+            <p>
+              Training produces checkpoints, logs, metadata, and immediate held-out
+              test metrics to summarize normalized-space model performance.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-card" id="structure">
+        <div class="section-heading">
+          <p class="section-label">Repository</p>
+          <h2>Where to look in the codebase</h2>
+        </div>
+        <div class="grid">
+          <div class="path-card">
+            <p class="path-name">src/</p>
+            <p>
+              Core pipeline logic for preprocessing, dataset loading, model
+              definition, hardware setup, and training.
+            </p>
+          </div>
+          <div class="path-card">
+            <p class="path-name">config/</p>
+            <p>
+              Runtime configuration that defines data paths, normalization policy,
+              precision, model hyperparameters, and training settings.
+            </p>
+          </div>
+          <div class="path-card">
+            <p class="path-name">unit_tests/</p>
+            <p>
+              Focused tests covering configuration behavior, dataset and model
+              expectations, and training loop semantics.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-card" id="getting-started">
+        <div class="section-heading">
+          <p class="section-label">Getting Started</p>
+          <h2>Main entrypoint and default configuration</h2>
+        </div>
+        <div class="callout">
+          <p>
+            The configured pipeline entrypoint is <code>python src/main.py</code>.
+            By default, it reads project settings from
+            <code>config/config.jsonc</code>.
+          </p>
+        </div>
+        <div class="code-block">
+<pre><code>python src/main.py</code></pre>
+        </div>
+        <p class="supporting-copy">
+          The repository assumes project-root paths for <code>config/</code>,
+          <code>data/</code>, <code>models/</code>, and <code>unit_tests/</code>,
+          so the default execution behavior stays anchored to the repository
+          structure.
+        </p>
+      </div>
+    </div>
+
+    <div class="footer">
+      <p>Static project overview for GitHub Pages deployment.</p>
+    </div>
+  </div>
+</body>
+</html>

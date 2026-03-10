@@ -19,8 +19,8 @@
     <script src="_static/js/theme.js"></script>
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
-    <link rel="next" title="Repository" href="repository.html" />
-    <link rel="prev" title="Overview" href="overview.html" /> 
+    <link rel="next" title="Scientific Baseline" href="scientific_baseline.html" />
+    <link rel="prev" title="Configuration" href="configuration.html" /> 
 </head>
 
 <body class="wy-body-for-nav"> 
@@ -45,26 +45,68 @@
               <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
 <ul class="current">
 <li class="toctree-l1"><a class="reference internal" href="overview.html">Overview</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="overview.html#current-modeling-objective">Current modeling objective</a></li>
+<li class="toctree-l2"><a class="reference internal" href="overview.html#purpose-and-scope">Purpose and scope</a></li>
+<li class="toctree-l2"><a class="reference internal" href="overview.html#scientific-objective">Scientific objective</a></li>
 <li class="toctree-l2"><a class="reference internal" href="overview.html#repository-priorities">Repository priorities</a></li>
+<li class="toctree-l2"><a class="reference internal" href="overview.html#environment-note">Environment note</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="data_contract.html">Data Contract</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#units-and-physical-conventions">Units and physical conventions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#hdf5-schema">HDF5 schema</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#sequence-length-and-padding">Sequence length and padding</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_contract.html#split-files">Split files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="configuration.html">Configuration</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#configuration-contract">Configuration contract</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#current-runtime-defaults">Current runtime defaults</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#runtime-control-keys">Runtime control keys</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#precision-policy">Precision policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="configuration.html#normalization-policy">Normalization policy</a></li>
 </ul>
 </li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Workflow</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#data-contract">1. Data contract</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#pipeline-stages">Pipeline stages</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#input-validation-and-split-resolution">1. Input validation and split resolution</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#preprocessing">2. Preprocessing</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#training">3. Training</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#evaluation">4. Evaluation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#optimizer-scheduler-and-hardware">Optimizer, scheduler, and hardware</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#artifact-policy">Artifact policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#reproducibility-and-performance">Reproducibility and performance</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="scientific_baseline.html">Scientific Baseline</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#forward-model-assumptions">Forward-model assumptions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#profile-generation-assumptions">Profile-generation assumptions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#chemistry-and-radiative-settings">Chemistry and radiative settings</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#architecture-baseline">Architecture baseline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#model-and-training-defaults">Model and training defaults</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="repository.html">Repository</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="repository.html#src"><code class="docutils literal notranslate"><span class="pre">src/</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="repository.html#config"><code class="docutils literal notranslate"><span class="pre">config/</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="repository.html#unit-tests"><code class="docutils literal notranslate"><span class="pre">unit_tests/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#data-and-models"><code class="docutils literal notranslate"><span class="pre">data/</span></code> and <code class="docutils literal notranslate"><span class="pre">models/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#docs-src-and-docs"><code class="docutils literal notranslate"><span class="pre">docs_src/</span></code> and <code class="docutils literal notranslate"><span class="pre">docs/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#review-boundaries">Review boundaries</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="development.html">Development</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="development.html#execution-environment">Execution environment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="development.html#static-analysis">Static analysis</a></li>
+<li class="toctree-l2"><a class="reference internal" href="development.html#testing-policy">Testing policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="development.html#implementation-checklist">Implementation checklist</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="getting_started.html">Getting Started</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="getting_started.html#default-command">Default command</a></li>
 <li class="toctree-l2"><a class="reference internal" href="getting_started.html#default-configuration">Default configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="getting_started.html#command-line-path-arguments">Command-line path arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="getting_started.html#expected-startup-behavior">Expected startup behavior</a></li>
+<li class="toctree-l2"><a class="reference internal" href="getting_started.html#launcher-note">Launcher note</a></li>
 </ul>
 </li>
 </ul>
@@ -96,26 +138,79 @@
 <h1>Workflow<a class="headerlink" href="#workflow" title="Link to this heading"></a></h1>
 <p>The main pipeline moves from raw HDF5 inputs to processed artifacts and then to
 trained checkpoints.</p>
-<section id="data-contract">
-<h2>1. Data contract<a class="headerlink" href="#data-contract" title="Link to this heading"></a></h2>
+<section id="pipeline-stages">
+<h2>Pipeline stages<a class="headerlink" href="#pipeline-stages" title="Link to this heading"></a></h2>
+<p>The default configured behavior is sequential preprocessing followed by
+training.</p>
+</section>
+<section id="input-validation-and-split-resolution">
+<h2>1. Input validation and split resolution<a class="headerlink" href="#input-validation-and-split-resolution" title="Link to this heading"></a></h2>
 <p>Raw HDF5 inputs are treated as the canonical source of truth. Required keys,
-shapes, and non-finite value checks are validated before later stages proceed.</p>
+shapes, and non-finite value checks are validated before later stages proceed.
+If the configured split file is missing, it is generated automatically before
+normalization.</p>
 </section>
 <section id="preprocessing">
 <h2>2. Preprocessing<a class="headerlink" href="#preprocessing" title="Link to this heading"></a></h2>
 <p>The preprocessing stage prepares dataset splits, normalization metadata,
 padding-aware tensors, and processed shard outputs according to the active
-configuration.</p>
+configuration. Existing processed artifacts may be reused only if structure and
+fingerprint validation both pass.</p>
 </section>
 <section id="training">
 <h2>3. Training<a class="headerlink" href="#training" title="Link to this heading"></a></h2>
 <p>The training pipeline uses explicit precision settings, deterministic seeding,
 configured hardware setup, and a transformer-based model implementation.</p>
+<ul class="simple">
+<li><p>Missing preprocessing artifacts are hard failures.</p></li>
+<li><p>Invalid sample indices are hard failures.</p></li>
+<li><p>All-padding batches are hard failures on first occurrence.</p></li>
+<li><p>If compile is enabled and compile fails, the run fails instead of falling
+back to eager execution.</p></li>
+<li><p>The baseline loss is masked mean-squared error over valid target elements.</p></li>
+</ul>
 </section>
 <section id="evaluation">
 <h2>4. Evaluation<a class="headerlink" href="#evaluation" title="Link to this heading"></a></h2>
 <p>Training produces checkpoints, logs, metadata, and immediate held-out test
 metrics so the repository retains a simple post-fit summary of performance.</p>
+</section>
+<section id="optimizer-scheduler-and-hardware">
+<h2>Optimizer, scheduler, and hardware<a class="headerlink" href="#optimizer-scheduler-and-hardware" title="Link to this heading"></a></h2>
+<p>The current supported training policy is intentionally narrow.</p>
+<ul class="simple">
+<li><p>Optimizer: AdamW</p></li>
+<li><p>Scheduler: cosine decay with warmup</p></li>
+<li><p>Allowed runtime backends: CPU, MPS, CUDA</p></li>
+<li><p>The checked-in default backend is CUDA so the default config aligns with the
+SLURM launcher in <code class="docutils literal notranslate"><span class="pre">run.sh</span></code>.</p></li>
+</ul>
+</section>
+<section id="artifact-policy">
+<h2>Artifact policy<a class="headerlink" href="#artifact-policy" title="Link to this heading"></a></h2>
+<p>Required outputs from training are:</p>
+<ul class="simple">
+<li><p>model checkpoints</p></li>
+<li><p>training logs</p></li>
+<li><p>training metadata</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">test_metrics.json</span></code> from an immediate held-out test-loss pass after fitting</p></li>
+</ul>
+<p>The training path does not produce export artifacts. Export and broader
+scientific evaluation remain optional manual workflows outside the core
+training loop.</p>
+</section>
+<section id="reproducibility-and-performance">
+<h2>Reproducibility and performance<a class="headerlink" href="#reproducibility-and-performance" title="Link to this heading"></a></h2>
+<p>The current policy prefers performance first and reproducibility second.</p>
+<ul class="simple">
+<li><p>Reasonable reproducibility is required, but full strict determinism is not.</p></li>
+<li><p>Preprocessing throughput, training speed, and inference speed all matter.</p></li>
+<li><p>The manuscript-scale reference problem is on the order of millions of
+profiles with sequence lengths around 75 layers.</p></li>
+<li><p>Reported training time is on the order of hours on a high-end GPU, and
+inference is expected to reach millisecond-scale latency per profile with
+better amortization under batching.</p></li>
+</ul>
 </section>
 </section>
 
@@ -123,8 +218,8 @@ metrics so the repository retains a simple post-fit summary of performance.</p>
            </div>
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
-        <a href="overview.html" class="btn btn-neutral float-left" title="Overview" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="repository.html" class="btn btn-neutral float-right" title="Repository" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="configuration.html" class="btn btn-neutral float-left" title="Configuration" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="scientific_baseline.html" class="btn btn-neutral float-right" title="Scientific Baseline" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 
   <hr/>

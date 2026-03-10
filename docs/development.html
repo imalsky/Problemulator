@@ -6,7 +6,7 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Repository &mdash; Problemulator documentation</title>
+  <title>Development &mdash; Problemulator documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
 
@@ -19,8 +19,8 @@
     <script src="_static/js/theme.js"></script>
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
-    <link rel="next" title="Development" href="development.html" />
-    <link rel="prev" title="Scientific Baseline" href="scientific_baseline.html" /> 
+    <link rel="next" title="Getting Started" href="getting_started.html" />
+    <link rel="prev" title="Repository" href="repository.html" /> 
 </head>
 
 <body class="wy-body-for-nav"> 
@@ -85,20 +85,20 @@
 <li class="toctree-l2"><a class="reference internal" href="scientific_baseline.html#model-and-training-defaults">Model and training defaults</a></li>
 </ul>
 </li>
-<li class="toctree-l1 current"><a class="current reference internal" href="#">Repository</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#src"><code class="docutils literal notranslate"><span class="pre">src/</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="#config"><code class="docutils literal notranslate"><span class="pre">config/</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="#unit-tests"><code class="docutils literal notranslate"><span class="pre">unit_tests/</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="#data-and-models"><code class="docutils literal notranslate"><span class="pre">data/</span></code> and <code class="docutils literal notranslate"><span class="pre">models/</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="#docs-src-and-docs"><code class="docutils literal notranslate"><span class="pre">docs_src/</span></code> and <code class="docutils literal notranslate"><span class="pre">docs/</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="#review-boundaries">Review boundaries</a></li>
+<li class="toctree-l1"><a class="reference internal" href="repository.html">Repository</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#src"><code class="docutils literal notranslate"><span class="pre">src/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#config"><code class="docutils literal notranslate"><span class="pre">config/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#unit-tests"><code class="docutils literal notranslate"><span class="pre">unit_tests/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#data-and-models"><code class="docutils literal notranslate"><span class="pre">data/</span></code> and <code class="docutils literal notranslate"><span class="pre">models/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#docs-src-and-docs"><code class="docutils literal notranslate"><span class="pre">docs_src/</span></code> and <code class="docutils literal notranslate"><span class="pre">docs/</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="repository.html#review-boundaries">Review boundaries</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="development.html">Development</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="development.html#execution-environment">Execution environment</a></li>
-<li class="toctree-l2"><a class="reference internal" href="development.html#static-analysis">Static analysis</a></li>
-<li class="toctree-l2"><a class="reference internal" href="development.html#testing-policy">Testing policy</a></li>
-<li class="toctree-l2"><a class="reference internal" href="development.html#implementation-checklist">Implementation checklist</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Development</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#execution-environment">Execution environment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#static-analysis">Static analysis</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#testing-policy">Testing policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#implementation-checklist">Implementation checklist</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="getting_started.html">Getting Started</a><ul>
@@ -125,7 +125,7 @@
           <div role="navigation" aria-label="Page navigation">
   <ul class="wy-breadcrumbs">
       <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
-      <li class="breadcrumb-item active">Repository</li>
+      <li class="breadcrumb-item active">Development</li>
       <li class="wy-breadcrumbs-aside">
       </li>
   </ul>
@@ -134,43 +134,53 @@
           <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
            <div itemprop="articleBody">
              
-  <section id="repository">
-<h1>Repository<a class="headerlink" href="#repository" title="Link to this heading"></a></h1>
-<p>The project keeps the core runtime behavior in a small set of top-level
-directories.</p>
-<section id="src">
-<h2><code class="docutils literal notranslate"><span class="pre">src/</span></code><a class="headerlink" href="#src" title="Link to this heading"></a></h2>
-<p>Core pipeline code for preprocessing, dataset handling, hardware setup, model
-definition, training, and the main configured execution path.</p>
-<p>Key entrypoints include <code class="docutils literal notranslate"><span class="pre">src/main.py</span></code> for the configured pipeline and
-<code class="docutils literal notranslate"><span class="pre">src/generate_splits.py</span></code> for explicit split generation.</p>
+  <section id="development">
+<h1>Development<a class="headerlink" href="#development" title="Link to this heading"></a></h1>
+<p>The repository spec defines a narrow development environment and a small set of
+standard checks.</p>
+<section id="execution-environment">
+<h2>Execution environment<a class="headerlink" href="#execution-environment" title="Link to this heading"></a></h2>
+<p>All development, preprocessing, training, and verification commands are
+expected to run in the <code class="docutils literal notranslate"><span class="pre">nn</span></code> environment. Running outside that environment is
+documented as out of spec.</p>
 </section>
-<section id="config">
-<h2><code class="docutils literal notranslate"><span class="pre">config/</span></code><a class="headerlink" href="#config" title="Link to this heading"></a></h2>
-<p>Checked-in runtime configuration for data paths, normalization policy,
-precision settings, model hyperparameters, and training controls.</p>
+<section id="static-analysis">
+<h2>Static analysis<a class="headerlink" href="#static-analysis" title="Link to this heading"></a></h2>
+<p>The standard static-analysis commands are run from the project root:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>ruff<span class="w"> </span>check<span class="w"> </span>src<span class="w"> </span>unit_tests
+pyflakes<span class="w"> </span>src<span class="w"> </span>unit_tests
+vulture<span class="w"> </span>src<span class="w"> </span>unit_tests
+</pre></div>
+</div>
+<p>These checks are used to keep the codebase clean and to surface correctness and
+dead-code issues, even though no strict merge gate is defined yet.</p>
 </section>
-<section id="unit-tests">
-<h2><code class="docutils literal notranslate"><span class="pre">unit_tests/</span></code><a class="headerlink" href="#unit-tests" title="Link to this heading"></a></h2>
-<p>Focused tests covering configuration behavior, dataset/model expectations, and
-training-loop semantics.</p>
+<section id="testing-policy">
+<h2>Testing policy<a class="headerlink" href="#testing-policy" title="Link to this heading"></a></h2>
+<p>Automated regression coverage lives in <code class="docutils literal notranslate"><span class="pre">unit_tests/</span></code>.</p>
+<ul class="simple">
+<li><p>Training is not blocked by fixed scientific metric thresholds at this stage.</p></li>
+<li><p>The baseline objective remains loss-driven masked MSE unless explicitly
+revised.</p></li>
+<li><p>A post-fit test pass may record held-out masked MSE and the best epoch in
+<code class="docutils literal notranslate"><span class="pre">test_metrics.json</span></code>.</p></li>
+<li><p>Broader scientific evaluation remains a manual workflow outside the required
+repository contract.</p></li>
+</ul>
 </section>
-<section id="data-and-models">
-<h2><code class="docutils literal notranslate"><span class="pre">data/</span></code> and <code class="docutils literal notranslate"><span class="pre">models/</span></code><a class="headerlink" href="#data-and-models" title="Link to this heading"></a></h2>
-<p>These directories are part of the default project-root layout for raw data,
-processed artifacts, and trained outputs. They must remain sibling directories
-of <code class="docutils literal notranslate"><span class="pre">src/</span></code> rather than resolving inside source code directories.</p>
-</section>
-<section id="docs-src-and-docs">
-<h2><code class="docutils literal notranslate"><span class="pre">docs_src/</span></code> and <code class="docutils literal notranslate"><span class="pre">docs/</span></code><a class="headerlink" href="#docs-src-and-docs" title="Link to this heading"></a></h2>
-<p><code class="docutils literal notranslate"><span class="pre">docs_src/</span></code> contains the Sphinx source files for the documentation site.
-<code class="docutils literal notranslate"><span class="pre">docs/</span></code> contains the generated HTML output that GitHub Pages serves.</p>
-</section>
-<section id="review-boundaries">
-<h2>Review boundaries<a class="headerlink" href="#review-boundaries" title="Link to this heading"></a></h2>
-<p>The default maintenance and review scope is source, tests, config, and spec
-files. <code class="docutils literal notranslate"><span class="pre">data/</span></code> and <code class="docutils literal notranslate"><span class="pre">models/</span></code> are not default audit targets unless a task
-explicitly requires them.</p>
+<section id="implementation-checklist">
+<h2>Implementation checklist<a class="headerlink" href="#implementation-checklist" title="Link to this heading"></a></h2>
+<p>Any refactor toward the current spec should preserve the following behavior:</p>
+<ul class="simple">
+<li><p>no implicit defaults for required runtime behavior</p></li>
+<li><p>no legacy split format support</p></li>
+<li><p>hard-fail handling for missing or invalid data and configuration</p></li>
+<li><p>config-driven precision policy end to end</p></li>
+<li><p>no export path during training</p></li>
+<li><p>immediate failure on all-padding batches</p></li>
+<li><p>no silent compile fallback when compile is explicitly enabled</p></li>
+<li><p>vectorized, performance-sensitive preprocessing and training paths</p></li>
+</ul>
 </section>
 </section>
 
@@ -178,8 +188,8 @@ explicitly requires them.</p>
            </div>
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
-        <a href="scientific_baseline.html" class="btn btn-neutral float-left" title="Scientific Baseline" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="development.html" class="btn btn-neutral float-right" title="Development" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="repository.html" class="btn btn-neutral float-left" title="Repository" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="getting_started.html" class="btn btn-neutral float-right" title="Getting Started" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 
   <hr/>

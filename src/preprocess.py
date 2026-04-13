@@ -5,6 +5,7 @@ preprocess.py - Preprocess raw HDF5 data into normalized NPY shards.
 This module:
 - Computes normalization statistics from the training split
 - Normalizes raw HDF5 data into fixed-length NPY shards for train/val/test
+- Groups channels by normalization method so preprocessing can stay NumPy-native
 - Preserves the padding convention (padding values remain padding_value)
 """
 from __future__ import annotations
@@ -34,6 +35,125 @@ TORCH_TO_NUMPY_DTYPE = {
     torch.float32: np.float32,
     torch.float64: np.float64,
 }
+
+METHOD_STAT_FIELDS = {
+    "standard": ("mean", "std"),
+    "log-standard": ("log_mean", "log_std"),
+    "signed-log": ("mean", "std"),
+    "log-min-max": ("min", "max", "clamp_min", "clamp_max"),
+    "max-out": ("max_val",),
+    "iqr": ("median", "iqr"),
+    "scaled_signed_offset_log": ("m",),
+    "symlog": ("threshold", "scale_factor"),
+}
+
+
+def _build_channel_normalization_groups(
+    variables: List[str],
+    norm_methods: Dict[str, str],
+    norm_stats: Dict[str, Dict[str, Any]],
+    *,
+    dtype: np.dtype,
+) -> List[Dict[str, Any]]:
+    """Group channel indices by normalization method with broadcast-ready stats."""
+    grouped_specs: Dict[str, Dict[str, Any]] = {}
+
+    for channel_idx, var in enumerate(variables):
+        method = str(norm_methods[var])
+        stats = norm_stats[var]
+        if method == "bool" or not stats:
+            continue
+
+        if method not in METHOD_STAT_FIELDS:
+            raise ValueError(f"Unsupported normalization method '{method}' for '{var}'.")
+
+        spec = grouped_specs.setdefault(
+            method,
+            {
+                "method": method,
+                "indices": [],
+                "stats": {field: [] for field in METHOD_STAT_FIELDS[method]},
+            },
+        )
+        spec["indices"].append(channel_idx)
+        for field in METHOD_STAT_FIELDS[method]:
+            spec["stats"][field].append(stats[field])
+
+    output_specs: List[Dict[str, Any]] = []
+    for method in grouped_specs:
+        spec = grouped_specs[method]
+        output_specs.append(
+            {
+                "method": method,
+                "indices": np.asarray(spec["indices"], dtype=np.int64),
+                "stats": {
+                    field: np.asarray(values, dtype=dtype)
+                    for field, values in spec["stats"].items()
+                },
+            }
+        )
+
+    return output_specs
+
+
+def _right_pad_sequence_batch(
+    array: np.ndarray, *, max_seq_len: int, padding_value: float
+) -> np.ndarray:
+    """Right-pad a [batch, seq_len, channels] array to ``max_seq_len``."""
+    cur_len = int(array.shape[1])
+    if cur_len >= max_seq_len:
+        return array
+
+    padded = np.full(
+        (array.shape[0], max_seq_len, array.shape[2]),
+        padding_value,
+        dtype=array.dtype,
+    )
+    padded[:, :cur_len, :] = array
+    return padded
+
+
+def _normalize_valid_sequence_batch_inplace(
+    batch: np.ndarray,
+    valid_mask: np.ndarray,
+    channel_specs: List[Dict[str, Any]],
+    *,
+    normalized_value_clamp: float,
+) -> None:
+    """Normalize valid timesteps in-place using grouped channel specs."""
+    if not channel_specs or not bool(valid_mask.any()):
+        return
+
+    valid_rows = batch[valid_mask]
+    for spec in channel_specs:
+        cols = spec["indices"]
+        valid_rows[:, cols] = DataNormalizer.normalize_array(
+            valid_rows[:, cols],
+            spec["method"],
+            spec["stats"],
+            normalized_value_clamp=normalized_value_clamp,
+        )
+    batch[valid_mask] = valid_rows
+
+
+def _normalize_global_batch_inplace(
+    batch: np.ndarray,
+    channel_specs: List[Dict[str, Any]],
+    *,
+    normalized_value_clamp: float,
+) -> None:
+    """Normalize per-profile global features in-place with grouped specs."""
+    if not channel_specs or batch.size == 0:
+        return
+
+    for spec in channel_specs:
+        cols = spec["indices"]
+        batch[:, cols] = DataNormalizer.normalize_array(
+            batch[:, cols],
+            spec["method"],
+            spec["stats"],
+            normalized_value_clamp=normalized_value_clamp,
+        )
 
 
 def _load_and_restore_chunk(
@@ -327,7 +447,9 @@ def preprocess_data(
     normalizer = DataNormalizer(config_data=config)
 
     logger.info("Calculating normalization statistics from training split...")
+    stats_start_time = time.perf_counter()
     norm_metadata = normalizer.calculate_stats(raw_hdf5_paths, splits["train"])
+    stats_elapsed_s = time.perf_counter() - stats_start_time
 
     # Save normalization metadata
     if not save_json(norm_metadata, processed_dir / "normalization_metadata.json"):
@@ -335,6 +457,29 @@ def preprocess_data(
 
     norm_methods: Dict[str, str] = norm_metadata["normalization_methods"]
     norm_stats: Dict[str, Dict[str, Any]] = norm_metadata["per_key_stats"]
+    input_norm_specs = _build_channel_normalization_groups(
+        input_vars,
+        norm_methods,
+        norm_stats,
+        dtype=np.dtype(processed_numpy_dtype),
+    )
+    target_norm_specs = _build_channel_normalization_groups(
+        target_vars,
+        norm_methods,
+        norm_stats,
+        dtype=np.dtype(processed_numpy_dtype),
+    )
+    global_norm_specs = _build_channel_normalization_groups(
+        global_vars,
+        norm_methods,
+        norm_stats,
+        dtype=np.dtype(processed_numpy_dtype),
+    )
+    timing_totals = {
+        "read_s": 0.0,
+        "normalize_s": 0.0,
+        "write_s": 0.0,
+    }
 
     # Create split directories (validation -> 'val' on disk)
     split_dir_map = {
@@ -422,6 +567,7 @@ def preprocess_data(
                         if chunk_idx.size == 0:
                             continue
 
+                        read_start = time.perf_counter()
                         # Load sequence-like variables (inputs + targets) in one pass
                         seq_data = _load_and_restore_chunk(
                             hf_raw,
@@ -452,114 +598,88 @@ def preprocess_data(
                             )
                         else:
                             global_data = {}
+                        timing_totals["read_s"] += time.perf_counter() - read_start
 
+                        normalize_start = time.perf_counter()
                         # Stack into arrays
-                        seq_in_np = np.stack([seq_data[var] for var in input_vars], axis=-1)
-                        tgt_np = np.stack([seq_data[var] for var in target_vars], axis=-1)
+                        seq_in_np = np.stack(
+                            [seq_data[var] for var in input_vars],
+                            axis=-1,
+                        ).astype(processed_numpy_dtype, copy=False)
+                        tgt_np = np.stack(
+                            [seq_data[var] for var in target_vars],
+                            axis=-1,
+                        ).astype(processed_numpy_dtype, copy=False)
 
                         glb_np = (
-                            np.stack([global_data[var] for var in global_vars], axis=-1)
+                            np.stack([global_data[var] for var in global_vars], axis=-1).astype(
+                                processed_numpy_dtype,
+                                copy=False,
+                            )
                             if global_vars
                             else None
                         )
 
-                        seq_in = torch.as_tensor(seq_in_np, dtype=processed_torch_dtype)
-                        tgt = torch.as_tensor(tgt_np, dtype=processed_torch_dtype)
-                        glb = (
-                            torch.as_tensor(glb_np, dtype=processed_torch_dtype)
-                            if glb_np is not None
-                            else None
+                        seq_in_np = _right_pad_sequence_batch(
+                            seq_in_np,
+                            max_seq_len=max_seq_len,
+                            padding_value=padding_value,
                         )
-
-                        # Ensure fixed length by right-padding with padding_value (not zeros)
-                        cur_len = int(seq_in.shape[1])
-                        if cur_len < max_seq_len:
-                            pad_width = max_seq_len - cur_len
-                            seq_in = torch.nn.functional.pad(seq_in, (0, 0, 0, pad_width), value=padding_value)
-                            tgt = torch.nn.functional.pad(tgt, (0, 0, 0, pad_width), value=padding_value)
+                        tgt_np = _right_pad_sequence_batch(
+                            tgt_np,
+                            max_seq_len=max_seq_len,
+                            padding_value=padding_value,
+                        )
 
                         # Compute padding mask once for all sequence channels.
                         # Per spec §4.2, padding is per-timestep (all features padded together),
                         # so one channel suffices for the mask.
-                        pad_mask = torch.isfinite(seq_in[:, :, 0]) & (
-                            torch.abs(seq_in[:, :, 0] - padding_value) <= pad_comparison_epsilon
+                        pad_mask = np.isfinite(seq_in_np[:, :, 0]) & (
+                            np.abs(seq_in_np[:, :, 0] - padding_value) <= pad_comparison_epsilon
                         )
                         valid_mask = ~pad_mask
-                        has_valid = bool(valid_mask.any())
-                        has_padding = bool(pad_mask.any())
+                        _normalize_valid_sequence_batch_inplace(
+                            seq_in_np,
+                            valid_mask,
+                            input_norm_specs,
+                            normalized_value_clamp=normalized_value_clamp,
+                        )
+                        _normalize_valid_sequence_batch_inplace(
+                            tgt_np,
+                            valid_mask,
+                            target_norm_specs,
+                            normalized_value_clamp=normalized_value_clamp,
+                        )
 
-                        # Normalize per-channel in-place, reusing the shared mask.
-                        for j, var in enumerate(input_vars):
-                            if var not in norm_methods or var not in norm_stats:
-                                raise KeyError(f"Missing normalization metadata for input variable '{var}'.")
-                            method = str(norm_methods[var])
-                            stats = norm_stats[var]
-                            if method != "bool" and stats:
-                                channel = seq_in[:, :, j]
-                                if has_valid:
-                                    channel[valid_mask] = DataNormalizer.normalize_tensor(
-                                        channel[valid_mask], method, stats,
-                                        normalized_value_clamp=normalized_value_clamp,
-                                    )
-                                if has_padding:
-                                    channel[pad_mask] = padding_value
-
-                        for j, var in enumerate(target_vars):
-                            if var not in norm_methods or var not in norm_stats:
-                                raise KeyError(f"Missing normalization metadata for target variable '{var}'.")
-                            method = str(norm_methods[var])
-                            stats = norm_stats[var]
-                            if method != "bool" and stats:
-                                channel = tgt[:, :, j]
-                                if has_valid:
-                                    channel[valid_mask] = DataNormalizer.normalize_tensor(
-                                        channel[valid_mask], method, stats,
-                                        normalized_value_clamp=normalized_value_clamp,
-                                    )
-                                if has_padding:
-                                    channel[pad_mask] = padding_value
-
-                        if global_vars and glb is not None:
-                            for j, var in enumerate(global_vars):
-                                if var not in norm_methods or var not in norm_stats:
-                                    raise KeyError(f"Missing normalization metadata for global variable '{var}'.")
-                                method = str(norm_methods[var])
-                                stats = norm_stats[var]
-                                if method != "bool" and stats:
-                                    # Globals are per-profile scalars (no padding), normalize directly.
-                                    glb[:, j] = DataNormalizer.normalize_tensor(
-                                        glb[:, j], method, stats,
-                                        normalized_value_clamp=normalized_value_clamp,
-                                    )
+                        if glb_np is not None:
+                            _normalize_global_batch_inplace(
+                                glb_np,
+                                global_norm_specs,
+                                normalized_value_clamp=normalized_value_clamp,
+                            )
+                        timing_totals["normalize_s"] += time.perf_counter() - normalize_start
 
                         # Write into shard buffers
-                        batch_n = int(seq_in.shape[0])
+                        write_start = time.perf_counter()
+                        batch_n = int(seq_in_np.shape[0])
                         start_pos = write_pos
                         end_pos = write_pos + batch_n
 
-                        seq_in_np2 = seq_in.numpy().astype(processed_numpy_dtype, copy=False)
-                        tgt_np2 = tgt.numpy().astype(processed_numpy_dtype, copy=False)
-                        glb_np2 = (
-                            glb.numpy().astype(processed_numpy_dtype, copy=False)
-                            if glb is not None
-                            else None
-                        )
-
                         if end_pos <= shard_size:
-                            seq_shard[start_pos:end_pos] = seq_in_np2
-                            tgt_shard[start_pos:end_pos] = tgt_np2
-                            if glb_shard is not None and glb_np2 is not None:
-                                glb_shard[start_pos:end_pos] = glb_np2
+                            seq_shard[start_pos:end_pos] = seq_in_np
+                            tgt_shard[start_pos:end_pos] = tgt_np
+                            if glb_shard is not None and glb_np is not None:
+                                glb_shard[start_pos:end_pos] = glb_np
                             write_pos = end_pos
                             pbar.update(batch_n)
                         else:
                             # Fill remainder of current shard
                             first_n = shard_size - start_pos
                             if first_n > 0:
-                                seq_shard[start_pos:shard_size] = seq_in_np2[:first_n]
-                                tgt_shard[start_pos:shard_size] = tgt_np2[:first_n]
-                                if glb_shard is not None and glb_np2 is not None:
-                                    glb_shard[start_pos:shard_size] = glb_np2[:first_n]
+                                seq_shard[start_pos:shard_size] = seq_in_np[:first_n]
+                                tgt_shard[start_pos:shard_size] = tgt_np[:first_n]
+                                if glb_shard is not None and glb_np is not None:
+                                    glb_shard[start_pos:shard_size] = glb_np[:first_n]
 
                             # Save full shard
                             _save_shard(seq_shard, tgt_shard, glb_shard, seq_dir, tgt_dir, glb_dir, shard_idx)
@@ -574,13 +694,14 @@ def preprocess_data(
                             # Write remaining portion into new shard
                             remaining = batch_n - first_n
                             if remaining > 0:
-                                seq_shard[0:remaining] = seq_in_np2[first_n:]
-                                tgt_shard[0:remaining] = tgt_np2[first_n:]
-                                if glb_shard is not None and glb_np2 is not None:
-                                    glb_shard[0:remaining] = glb_np2[first_n:]
+                                seq_shard[0:remaining] = seq_in_np[first_n:]
+                                tgt_shard[0:remaining] = tgt_np[first_n:]
+                                if glb_shard is not None and glb_np is not None:
+                                    glb_shard[0:remaining] = glb_np[first_n:]
 
                             write_pos = remaining
                             pbar.update(batch_n)
+                        timing_totals["write_s"] += time.perf_counter() - write_start
 
         # Save final partial shard if any
         if write_pos > 0:
@@ -599,6 +720,13 @@ def preprocess_data(
 
     total_time = time.time() - preprocessing_start_time
     logger.info(f"Preprocessing completed successfully in {total_time:.2f}s.")
+    logger.info(
+        "Preprocessing timings: stats=%.2fs read=%.2fs normalize=%.2fs write=%.2fs",
+        stats_elapsed_s,
+        timing_totals["read_s"],
+        timing_totals["normalize_s"],
+        timing_totals["write_s"],
+    )
 
     return True
 

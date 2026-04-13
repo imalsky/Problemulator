@@ -38,13 +38,12 @@ data-generation workflow.
 Architecture baseline
 ---------------------
 
-The checked-in model family is an encoder-only transformer for sequence
-regression.
+The checked-in model family supports two sequence-regression backbones with a
+shared FiLM-conditioned regression head.
 
-- layerwise token embedding
-- sinusoidal positional encoding
-- multi-head self-attention encoder stack
-- FiLM conditioning with global features
+- default baseline: encoder-only transformer
+- optional comparison baseline: bidirectional LSTM
+- shared latent width and FiLM conditioning with global features
 - regression head that outputs layerwise target channels without a final output
   clamp
 
@@ -58,22 +57,26 @@ The current checked-in configuration uses the following baseline values:
 
    * - Setting
      - Value
+   * - ``model_hyperparameters.model_type``
+     - ``transformer``
    * - ``model_hyperparameters.d_model``
      - ``128``
-   * - ``model_hyperparameters.nhead``
+   * - ``model_hyperparameters.transformer.nhead``
      - ``4``
-   * - ``model_hyperparameters.num_encoder_layers``
+   * - ``model_hyperparameters.transformer.num_layers``
      - ``3``
-   * - ``model_hyperparameters.dim_feedforward``
+   * - ``model_hyperparameters.transformer.dim_feedforward``
      - ``512``
    * - ``model_hyperparameters.dropout``
-     - ``0.0``
-   * - ``model_hyperparameters.attention_dropout``
-     - ``0.0``
+     - ``0.05``
+   * - ``model_hyperparameters.transformer.attention_dropout``
+     - ``0.05``
    * - ``model_hyperparameters.max_sequence_length``
      - ``100``
    * - ``training_hyperparameters.learning_rate``
      - ``1e-4``
+   * - ``training_hyperparameters.scheduler_type``
+     - ``plateau``
    * - ``training_hyperparameters.weight_decay``
      - ``1e-5``
    * - ``training_hyperparameters.gradient_clip_val``

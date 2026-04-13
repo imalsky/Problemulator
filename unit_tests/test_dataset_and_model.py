@@ -17,6 +17,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from dataset import pad_collate
+from lstm_model import LSTMPredictionModel
 from model import FiLMLayer, PredictionModel
 
 
@@ -162,6 +163,95 @@ class DatasetAndModelTests(unittest.TestCase):
         linear2_weight = model.blocks[0].transformer.linear2.weight.detach()
         self.assertGreater(float(linear1_weight.abs().max()), 0.1)
         self.assertGreater(float(linear2_weight.abs().max()), 0.1)
+
+    def test_prediction_model_keeps_explicit_prenorm_layer_norms(self) -> None:
+        """The transformer baseline should remain explicitly pre-norm."""
+        model = PredictionModel(
+            input_dim=2,
+            global_input_dim=1,
+            output_dim=1,
+            d_model=8,
+            nhead=2,
+            num_encoder_layers=2,
+            dim_feedforward=16,
+            dropout=0.05,
+            attention_dropout=0.05,
+            max_sequence_length=8,
+            film_clamp=2.0,
+            output_head_divisor=2,
+            output_head_dropout_factor=0.5,
+        )
+
+        self.assertIsInstance(model.input_proj[1], torch.nn.LayerNorm)
+        self.assertIsInstance(model.blocks[0].transformer.norm1, torch.nn.LayerNorm)
+        self.assertIsInstance(model.blocks[0].transformer.norm2, torch.nn.LayerNorm)
+        self.assertIsInstance(model.final_norm, torch.nn.LayerNorm)
+
+    def test_lstm_model_requires_global_features_when_configured(self) -> None:
+        """Configured global conditioning must also be enforced for the LSTM path."""
+        model = LSTMPredictionModel(
+            input_dim=2,
+            global_input_dim=1,
+            output_dim=1,
+            d_model=4,
+            num_lstm_layers=2,
+            bidirectional=True,
+            dropout=0.05,
+            max_sequence_length=8,
+            film_clamp=2.0,
+            output_head_divisor=2,
+            output_head_dropout_factor=0.5,
+        )
+        sequence = torch.randn(2, 4, 2)
+        sequence_mask = torch.zeros(2, 4, dtype=torch.bool)
+
+        with self.assertRaisesRegex(ValueError, "expects global_features"):
+            model(sequence, global_features=None, sequence_mask=sequence_mask)
+
+    def test_lstm_model_returns_expected_shape(self) -> None:
+        """The LSTM baseline should preserve the sequence-shaped regression contract."""
+        model = LSTMPredictionModel(
+            input_dim=2,
+            global_input_dim=1,
+            output_dim=3,
+            d_model=4,
+            num_lstm_layers=2,
+            bidirectional=True,
+            dropout=0.05,
+            max_sequence_length=8,
+            film_clamp=2.0,
+            output_head_divisor=2,
+            output_head_dropout_factor=0.5,
+        )
+        sequence = torch.randn(2, 4, 2)
+        global_features = torch.randn(2, 1)
+        sequence_mask = torch.tensor(
+            [[False, False, False, True], [False, False, False, False]],
+            dtype=torch.bool,
+        )
+
+        output = model(sequence, global_features=global_features, sequence_mask=sequence_mask)
+
+        self.assertEqual(tuple(output.shape), (2, 4, 3))
+
+    def test_lstm_model_bidirectional_projection_matches_hidden_width(self) -> None:
+        """Bidirectional recurrent blocks should project 2*d_model activations back to d_model."""
+        model = LSTMPredictionModel(
+            input_dim=2,
+            global_input_dim=0,
+            output_dim=1,
+            d_model=6,
+            num_lstm_layers=1,
+            bidirectional=True,
+            dropout=0.05,
+            max_sequence_length=8,
+            film_clamp=2.0,
+            output_head_divisor=2,
+            output_head_dropout_factor=0.5,
+        )
+
+        self.assertEqual(model.blocks[0].output_proj.in_features, 12)
+        self.assertEqual(model.blocks[0].output_proj.out_features, 6)
 
 
 if __name__ == "__main__":

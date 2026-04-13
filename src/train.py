@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Training loop orchestration for the atmospheric-profile emulator."""
+
 from __future__ import annotations
 
 import gc
@@ -11,8 +13,7 @@ from torch import nn, optim
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
-    LinearLR,
-    SequentialLR,
+    ReduceLROnPlateau,
 )
 from torch.utils.data import DataLoader
 
@@ -23,11 +24,66 @@ from utils import get_precision_config, save_json, seed_everything
 
 logger = logging.getLogger(__name__)
 
+
+class WarmupScheduler:
+    """
+    Apply linear warmup before handing control to a downstream scheduler.
+
+    The wrapped scheduler can be either step-based (for example cosine) or
+    metric-based (for example ReduceLROnPlateau). Warmup updates happen after
+    each epoch so the logged learning rate always reflects the value used
+    during that epoch.
+    """
+
+    def __init__(
+        self,
+        optimizer: optim.Optimizer,
+        warmup_epochs: int,
+        warmup_start_factor: float,
+        after_scheduler: torch.optim.lr_scheduler.LRScheduler | ReduceLROnPlateau,
+        after_scheduler_requires_metric: bool,
+    ) -> None:
+        self.optimizer = optimizer
+        self.warmup_epochs = int(warmup_epochs)
+        self.warmup_start_factor = float(warmup_start_factor)
+        self.after_scheduler = after_scheduler
+        self.after_scheduler_requires_metric = after_scheduler_requires_metric
+        self.completed_epochs = 0
+        self.base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
+
+        if self.warmup_epochs > 0:
+            self._set_warmup_lr(0)
+
+    def _set_warmup_lr(self, completed_warmup_epochs: int) -> None:
+        """Set optimizer learning rates for the current warmup progress."""
+        progress = completed_warmup_epochs / self.warmup_epochs
+        factor = self.warmup_start_factor + (1.0 - self.warmup_start_factor) * progress
+        for group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
+            group["lr"] = base_lr * factor
+
+    def step(self, metric: Optional[float] = None) -> None:
+        """Advance warmup or the wrapped scheduler by one epoch."""
+        if self.completed_epochs < self.warmup_epochs:
+            self.completed_epochs += 1
+            self._set_warmup_lr(self.completed_epochs)
+            return
+
+        if self.after_scheduler_requires_metric:
+            if metric is None:
+                raise ValueError("WarmupScheduler requires a metric for plateau stepping.")
+            self.after_scheduler.step(metric)
+        else:
+            self.after_scheduler.step()
+
+        self.completed_epochs += 1
+
 class DevicePrefetchLoader:
     """
-    Wraps a DataLoader to prefetch batches to device asynchronously.
-    
-    Overlaps data transfer with computation for better GPU utilization.
+    Wrap a DataLoader and move batches onto the target device ahead of use.
+
+    On CUDA, this overlaps host-to-device transfer with model execution on a
+    side stream. The nested batch containers are updated in place to avoid
+    rebuilding small dictionaries for every batch.
     """
     
     def __init__(
@@ -94,7 +150,7 @@ class DevicePrefetchLoader:
         batch: Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor, torch.Tensor],
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         """
-        Move batch to target device.
+        Move one collated batch to the target device.
 
         Args:
             batch: ``(inputs, masks, targets, target_masks)`` from ``pad_collate``.
@@ -102,33 +158,30 @@ class DevicePrefetchLoader:
                 ``targets`` has shape ``[batch, seq_len, target_dim]``.
 
         Returns:
-            The same tuple moved onto ``self.device``. Masks stay boolean with
-            ``True`` meaning padding so they can be used directly by attention and loss code.
+            The same logical batch on ``self.device``. The input and mask
+            dictionaries are updated in place; masks remain boolean with
+            ``True`` meaning padding so they can be consumed directly by
+            attention and loss code.
         """
         inputs, masks, targets, tgt_masks = batch
         non_blocking = self.is_cuda
-        
-        # Move inputs
-        device_inputs = {}
-        device_inputs["sequence"] = inputs["sequence"].to(
+
+        inputs["sequence"] = inputs["sequence"].to(
             self.device, dtype=self.forward_dtype, non_blocking=non_blocking
         )
         if "global_features" in inputs:
-            device_inputs["global_features"] = inputs["global_features"].to(
+            inputs["global_features"] = inputs["global_features"].to(
                 self.device, dtype=self.forward_dtype, non_blocking=non_blocking
             )
-        
-        # Move masks (keep as boolean)
-        device_masks = {}
-        device_masks["sequence"] = masks["sequence"].to(
+
+        masks["sequence"] = masks["sequence"].to(
             self.device, non_blocking=non_blocking
         )
-        
-        # Move targets and target masks
-        device_targets = targets.to(self.device, dtype=self.loss_dtype, non_blocking=non_blocking)
-        device_tgt_masks = tgt_masks.to(self.device, non_blocking=non_blocking)
-        
-        return device_inputs, device_masks, device_targets, device_tgt_masks
+
+        targets = targets.to(self.device, dtype=self.loss_dtype, non_blocking=non_blocking)
+        tgt_masks = tgt_masks.to(self.device, non_blocking=non_blocking)
+
+        return inputs, masks, targets, tgt_masks
     
     def __len__(self) -> int:
         """Return number of batches."""
@@ -361,40 +414,56 @@ class ModelTrainer:
     def _build_scheduler(self, tp: Dict) -> None:
         """Create learning rate scheduler."""
         scheduler_type = str(tp["scheduler_type"]).lower()
-        if scheduler_type != "cosine":
-            raise ValueError(
-                f"Unsupported scheduler_type '{scheduler_type}'. Only 'cosine' is allowed."
-            )
-
         epochs = int(tp["epochs"])
         warmup_epochs = int(tp["warmup_epochs"])
         if warmup_epochs >= epochs:
             raise ValueError("warmup_epochs must be less than total epochs.")
-
-        main_scheduler = CosineAnnealingLR(
-            self.optimizer,
-            T_max=epochs - warmup_epochs,
-            eta_min=float(tp["min_lr"]),
-        )
-
         warmup_start_factor = float(tp["warmup_start_factor"])
+        min_lr = float(tp["min_lr"])
 
-        if warmup_epochs > 0:
-            warmup_scheduler = LinearLR(
+        if scheduler_type == "cosine":
+            main_scheduler = CosineAnnealingLR(
                 self.optimizer,
-                start_factor=warmup_start_factor,
-                end_factor=1.0,
-                total_iters=warmup_epochs,
+                T_max=epochs - warmup_epochs,
+                eta_min=min_lr,
             )
-            self.scheduler = SequentialLR(
+            self.scheduler = WarmupScheduler(
                 self.optimizer,
-                schedulers=[warmup_scheduler, main_scheduler],
-                milestones=[warmup_epochs],
+                warmup_epochs=warmup_epochs,
+                warmup_start_factor=warmup_start_factor,
+                after_scheduler=main_scheduler,
+                after_scheduler_requires_metric=False,
             )
-            logger.info(f"Cosine scheduler with {warmup_epochs} warmup epochs.")
-        else:
-            self.scheduler = main_scheduler
-            logger.info("Cosine scheduler without warmup.")
+            logger.info("Cosine scheduler with %d warmup epochs.", warmup_epochs)
+            return
+
+        if scheduler_type == "plateau":
+            main_scheduler = ReduceLROnPlateau(
+                self.optimizer,
+                mode="min",
+                factor=float(tp["plateau_factor"]),
+                patience=int(tp["plateau_patience"]),
+                threshold=float(tp["plateau_threshold"]),
+                threshold_mode=str(tp["plateau_threshold_mode"]).lower(),
+                min_lr=min_lr,
+            )
+            self.scheduler = WarmupScheduler(
+                self.optimizer,
+                warmup_epochs=warmup_epochs,
+                warmup_start_factor=warmup_start_factor,
+                after_scheduler=main_scheduler,
+                after_scheduler_requires_metric=True,
+            )
+            logger.info(
+                "Plateau scheduler with %d warmup epochs, patience=%d, factor=%.3f, threshold=%.2e.",
+                warmup_epochs,
+                int(tp["plateau_patience"]),
+                float(tp["plateau_factor"]),
+                float(tp["plateau_threshold"]),
+            )
+            return
+
+        raise ValueError(f"Unsupported scheduler_type '{scheduler_type}'.")
     
     def _setup_training_params(self, tp: Dict) -> None:
         """Setup training parameters and loss function."""
@@ -403,6 +472,7 @@ class ModelTrainer:
         
         # Gradient clipping
         self.max_grad_norm = float(tp["gradient_clip_val"])
+        self.early_stopping_min_delta = float(tp["min_delta"])
         
         # Mixed precision training
         requested_amp = self.precision["use_amp"]
@@ -433,6 +503,7 @@ class ModelTrainer:
         self.log_path.write_text("epoch,train_loss,val_loss,lr,time_s,improvement\n")
         
         self.best_val_loss = float("inf")
+        self.best_early_stopping_val = float("inf")
         self.best_epoch = -1
 
     def _save_metadata(self) -> None:
@@ -466,7 +537,6 @@ class ModelTrainer:
         tp = self.cfg["training_hyperparameters"]
         epochs = int(tp["epochs"])
         patience = int(tp["early_stopping_patience"])
-        min_delta = float(tp["min_delta"])
         
         epochs_without_improvement = 0
         
@@ -495,25 +565,29 @@ class ModelTrainer:
                 epoch_lr,
             )
             
-            # Check for improvement and early stopping
-            if val_loss < previous_best_val - min_delta:
-                # Improvement found
+            # Strict validation decreases always update the best checkpoint.
+            if val_loss < previous_best_val:
                 self.best_val_loss = val_loss
                 self.best_epoch = epoch
-                epochs_without_improvement = 0
                 self._save_best_model()
+
+            # Early stopping uses its own minimum-improvement threshold so the
+            # training loop can continue through tiny strict improvements while
+            # still stopping once meaningful validation progress has stalled.
+            if val_loss < self.best_early_stopping_val - self.early_stopping_min_delta:
+                self.best_early_stopping_val = val_loss
+                epochs_without_improvement = 0
             else:
-                # No improvement
                 epochs_without_improvement += 1
 
-                if epochs_without_improvement >= patience:
-                    logger.info(
-                        f"Early stopping triggered after {patience} epochs "
-                        f"without improvement."
-                    )
-                    break
+            self.scheduler.step(val_loss)
 
-            self.scheduler.step()
+            if epochs_without_improvement >= patience:
+                logger.info(
+                    f"Early stopping triggered after {patience} epochs "
+                    f"without improvement >= {self.early_stopping_min_delta:.1e}."
+                )
+                break
         
         logger.info(
             f"Training complete. Best val_loss={self.best_val_loss:.4e} "

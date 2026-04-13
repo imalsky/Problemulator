@@ -222,7 +222,7 @@ Behavior:
 
 - Supported training policy for current project baseline:
   - Optimizer: AdamW
-  - Scheduler: cosine with warmup
+  - Scheduler: warmup followed by either cosine decay or validation plateau reduction
 - Unsupported optimizer/scheduler choices: hard failure unless explicitly added.
 
 ### 7.2 Hardware Support
@@ -334,22 +334,24 @@ Current policy:
 ## 13. Model Architecture Baseline (Current)
 
 - Architecture family:
-  - Encoder-only transformer for sequence regression.
+  - Config-selected sequence model with transformer default and optional LSTM baseline.
 - Current baseline structure:
-  - Layerwise token embedding + sinusoidal positional encoding.
-  - Multi-head self-attention encoder stack.
-  - FiLM conditioning with global features (initial and per-block modulation).
+  - Shared layerwise projection and FiLM conditioning with global features.
+  - Transformer path: sinusoidal positional encoding + multi-head self-attention encoder stack.
+  - LSTM path: bidirectional recurrent stack projected back to the shared latent width.
   - Regression head to layerwise target channels with no final activation clamp.
 - Hyperparameters are config-defined and must not be hardcoded in source.
 - Current checked-in config baseline (`config/config.jsonc`, as of March 7, 2026):
   - `device_backend = cuda`
+  - `model_type = transformer`
   - `d_model = 128`
-  - `nhead = 4`
-  - `num_encoder_layers = 3`
-  - `dim_feedforward = 512`
-  - `dropout = 0.0`
+  - `transformer.nhead = 4`
+  - `transformer.num_layers = 3`
+  - `transformer.dim_feedforward = 512`
+  - `dropout = 0.05`
   - `epochs = 300`
   - `optimizer = AdamW`
+  - `scheduler_type = plateau`
   - `learning_rate = 1e-4`
   - `min_lr = 1e-6`
   - `weight_decay = 1e-5`

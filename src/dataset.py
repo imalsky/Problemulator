@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-PADDING CONVENTION:
-- Padding value: defined in config (data_specification.padding_value)
-- Mask convention: True = padding position, False = valid position
-- This follows PyTorch's convention for key_padding_mask
-- All features at a timestep must equal padding_value for it to be considered padding
+Load preprocessed atmospheric-profile shards for training and evaluation.
 
-DATA ASSUMPTIONS:
-- Shards contain consistent data types within each split
-- All shards in a split have the same feature dimensions
-- Shard metadata accurately reflects the contained data
-- Indices provided are non-negative integers
-- HDF5 files have been preprocessed and normalized appropriately
+This module consumes processed ``.npy`` shards plus split metadata emitted by
+the preprocessing stage. It does not read raw HDF5 training inputs directly.
+
+Padding convention:
+- The padding sentinel comes from ``data_specification.padding_value``.
+- Masks use PyTorch's convention: ``True`` means "padding timestep".
+- A timestep is padded only when every feature in that row equals the sentinel.
 """
 from __future__ import annotations
 
@@ -32,14 +29,11 @@ logger = logging.getLogger(__name__)
 
 class AtmosphericDataset(Dataset):
     """
-    Dataset for loading preprocessed atmospheric profile data.
-    
-    Uses explicit config policy for RAM vs disk loading.
-    Uses memory mapping for large files to reduce I/O.
-    
-    Padding Convention:
-    - Sequences are right-padded (padding at the end)
-    - Padding positions have all features set to padding_value
+    Dataset for preprocessed atmospheric-profile shards.
+
+    The dataset can either load an entire split into RAM or serve samples from
+    shard-backed storage with a bounded cache, depending on config and the
+    estimated split size.
     """
     
     def __init__(
@@ -459,13 +453,13 @@ def pad_collate(
     tensor_dtype: Optional[torch.dtype] = None,
 ) -> Tuple[Dict[str, Tensor], Dict[str, Tensor], Tensor, Tensor]:
     """
-    Collate function with safe padding detection.
-    
-    Creates padding masks by comparing values to padding sentinel
-    within an epsilon tolerance to handle floating point precision.
-    
-    This follows PyTorch's convention for key_padding_mask in attention.
-    
+    Collate a batch and derive the timestep padding mask.
+
+    The sequence tensor is treated as the authoritative source for padding.
+    Preprocessing guarantees that targets are padded on the same timesteps, so
+    the returned ``target_masks`` reuses the sequence mask instead of
+    recomputing it from the targets.
+
     Args:
         batch: List of (inputs, targets) tuples
         padding_value: Sentinel value for padding
@@ -513,17 +507,16 @@ def pad_collate(
             [d["global_features"] for d in inputs]
         )
     
-    # Stack targets and create masks
+    # Stack targets. Padding is defined by the input-sequence contract, so the
+    # sequence mask is reused for the regression targets as well.
     tgt = _stack_to_tensor(targets)
-    
-    # Targets must use the same padding pattern as inputs so the attention mask
-    # and masked regression loss stay aligned.
-    tgt_mask = (torch.abs(tgt - padding_value) <= padding_epsilon).all(dim=-1)
-    
-    # Validate that sequence and target masks match
-    # (padding positions should be the same for inputs and targets)
-    if not torch.equal(seq_mask, tgt_mask):
-        raise RuntimeError("Sequence and target padding masks do not match.")
+
+    if tgt.shape[:2] != seq.shape[:2]:
+        raise RuntimeError(
+            f"Target shape {tuple(tgt.shape[:2])} does not match sequence shape {tuple(seq.shape[:2])}."
+        )
+
+    tgt_mask = seq_mask
     if bool(tgt_mask.all()):
         raise RuntimeError("All-padding batch encountered during collation.")
     

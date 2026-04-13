@@ -5,11 +5,16 @@
     "detect_anomaly": false,
     "shard_size": 10000,
     "hdf5_read_chunk_size": 8192,
+    // Available backends: "cuda", "mps", "cpu"
     "device_backend": "cuda",
     "torch_compile": false,
+    // Available compile modes: "default", "reduce-overhead",
+    // "max-autotune", "max-autotune-no-cudagraphs"
     "compile_mode": "default",
+    // Available modes: "normalize", "train"
     "execution_mode": "train",
     "rebuild_processed_data": false,
+    // Available dataset loading modes: "auto", "ram", "disk"
     "dataset_loading_mode": "auto",
     "dataset_max_cached_shards": 200,
     "dataset_large_shard_mmap_bytes": 52428800,
@@ -84,16 +89,24 @@
     "float32_matmul_precision": "high"
   },
   "model_hyperparameters": {
+    // Available model types: "transformer", "lstm"
+    "model_type": "transformer",
     "d_model": 128,
-    "nhead": 4,
-    "num_encoder_layers": 3,
-    "dim_feedforward": 512,
-    "dropout": 0.0,
-    "attention_dropout": 0.0,
+    "dropout": 0.05,
     "film_clamp": 10.0,
     "max_sequence_length": 100,
     "output_head_divisor": 2,
-    "output_head_dropout_factor": 0.5
+    "output_head_dropout_factor": 0.5,
+    "transformer": {
+      "nhead": 4,
+      "num_layers": 3,
+      "dim_feedforward": 512,
+      "attention_dropout": 0.05
+    },
+    "lstm": {
+      "num_layers": 3,
+      "bidirectional": true
+    }
   },
   "training_hyperparameters": {
     "epochs": 300,
@@ -102,12 +115,18 @@
     "weight_decay": 1e-05,
     "optimizer": "adamw",
     "gradient_clip_val": 2.0,
-    "scheduler_type": "cosine",
+    // Available schedulers: "cosine", "plateau"
+    "scheduler_type": "plateau",
     "min_lr": 1e-06,
     "warmup_epochs": 10,
-    "warmup_start_factor": 1e-05,
-    "early_stopping_patience": 99999,
-    "min_delta": 1e-09,
+    "warmup_start_factor": 0.1,
+    "plateau_patience": 10,
+    "plateau_factor": 0.5,
+    "plateau_threshold": 1e-05,
+    // Available threshold modes: "abs", "rel"
+    "plateau_threshold_mode": "abs",
+    "early_stopping_patience": 30,
+    "min_delta": 1e-06,
     "use_amp": false,
     "dataset_fraction_to_use": 1.0
   },

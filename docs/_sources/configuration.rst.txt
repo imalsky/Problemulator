@@ -47,9 +47,29 @@ settings:
    * - ``training_hyperparameters.optimizer``
      - ``adamw``
    * - ``training_hyperparameters.scheduler_type``
-     - ``cosine``
+     - ``plateau``
    * - ``training_hyperparameters.learning_rate``
      - ``1e-4``
+   * - ``model_hyperparameters.model_type``
+     - ``transformer``
+   * - ``model_hyperparameters.dropout``
+     - ``0.05``
+
+Architecture-specific keys
+--------------------------
+
+The checked-in config uses one shared model section plus architecture-specific
+subsections.
+
+- Shared model keys include ``model_type``, ``d_model``, ``dropout``,
+  ``film_clamp``, ``max_sequence_length``, ``output_head_divisor``, and
+  ``output_head_dropout_factor``.
+- Transformer runs use ``model_hyperparameters.transformer`` with
+  ``nhead``, ``num_layers``, ``dim_feedforward``, and
+  ``attention_dropout``.
+- LSTM runs use ``model_hyperparameters.lstm`` with ``num_layers`` and
+  ``bidirectional``.
+- Only the active architecture subsection is required at validation time.
 
 Runtime control keys
 --------------------

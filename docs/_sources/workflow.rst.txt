@@ -30,7 +30,8 @@ fingerprint validation both pass.
 -----------
 
 The training pipeline uses explicit precision settings, deterministic seeding,
-configured hardware setup, and a transformer-based model implementation.
+configured hardware setup, and a config-selected sequence model
+implementation.
 
 - Missing preprocessing artifacts are hard failures.
 - Invalid sample indices are hard failures.
@@ -51,7 +52,8 @@ Optimizer, scheduler, and hardware
 The current supported training policy is intentionally narrow.
 
 - Optimizer: AdamW
-- Scheduler: cosine decay with warmup
+- Scheduler: warmup followed by validation-driven plateau reduction by default
+- Model family: transformer by default, optional bidirectional LSTM baseline
 - Allowed runtime backends: CPU, MPS, CUDA
 - The checked-in default backend is CUDA so the default config aligns with the
   SLURM launcher in ``run.sh``.

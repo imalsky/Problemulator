@@ -48,7 +48,9 @@ REQUIRED_CONFIG_SECTIONS = {
 }
 SUPPORTED_DEVICE_BACKENDS = {"cpu", "mps", "cuda"}
 SUPPORTED_OPTIMIZER = "adamw"
-SUPPORTED_SCHEDULER = "cosine"
+SUPPORTED_SCHEDULERS = {"cosine", "plateau"}
+SUPPORTED_MODEL_TYPES = {"transformer", "lstm"}
+SUPPORTED_PLATEAU_THRESHOLD_MODES = {"abs", "rel"}
 SUPPORTED_FLOAT32_MATMUL_PRECISION = {"highest", "high", "medium", "none"}
 SUPPORTED_COMPILE_MODES = {
     "default",
@@ -522,12 +524,9 @@ def validate_config(config: Dict[str, Any]) -> None:
     # model_hyperparameters
     model_params = require_section("model_hyperparameters")
     required_model_keys = {
+        "model_type",
         "d_model",
-        "nhead",
-        "num_encoder_layers",
-        "dim_feedforward",
         "dropout",
-        "attention_dropout",
         "film_clamp",
         "max_sequence_length",
         "output_head_divisor",
@@ -539,25 +538,27 @@ def validate_config(config: Dict[str, Any]) -> None:
             f"Missing required model_hyperparameters keys: {sorted(missing_model_keys)}"
         )
 
+    model_type = str(model_params["model_type"]).lower()
+    if model_type not in SUPPORTED_MODEL_TYPES:
+        raise ValueError(
+            "'model_hyperparameters.model_type' must be one of "
+            f"{sorted(SUPPORTED_MODEL_TYPES)}."
+        )
+
     d_model = model_params["d_model"]
-    nhead = model_params["nhead"]
     if not isinstance(d_model, int) or d_model <= 0:
         raise ValueError("'model_hyperparameters.d_model' must be a positive integer.")
-    if not isinstance(nhead, int) or nhead <= 0:
-        raise ValueError("'model_hyperparameters.nhead' must be a positive integer.")
-    if d_model % nhead != 0:
-        raise ValueError(f"'d_model' ({d_model}) must be divisible by 'nhead' ({nhead}).")
     if not isinstance(model_params["max_sequence_length"], int) or model_params["max_sequence_length"] <= 0:
         raise ValueError("'model_hyperparameters.max_sequence_length' must be a positive integer.")
 
-    for positive_key in ("num_encoder_layers", "dim_feedforward", "output_head_divisor"):
+    for positive_key in ("output_head_divisor",):
         value = model_params[positive_key]
         if not isinstance(value, int) or value <= 0:
             raise ValueError(
                 f"'model_hyperparameters.{positive_key}' must be a positive integer."
             )
 
-    for prob_key in ("dropout", "attention_dropout", "output_head_dropout_factor"):
+    for prob_key in ("dropout", "output_head_dropout_factor"):
         value = model_params[prob_key]
         if not isinstance(value, (int, float)):
             raise ValueError(f"'model_hyperparameters.{prob_key}' must be numeric.")
@@ -578,6 +579,67 @@ def validate_config(config: Dict[str, Any]) -> None:
             f"to keep output head width >= 1 (got divisor={output_head_divisor}, d_model={d_model})."
         )
 
+    transformer_params = model_params.get("transformer")
+    if model_type == "transformer":
+        if not isinstance(transformer_params, dict):
+            raise ValueError(
+                "'model_hyperparameters.transformer' must be a dictionary when "
+                "model_type='transformer'."
+            )
+        required_transformer_keys = {
+            "nhead",
+            "num_layers",
+            "dim_feedforward",
+            "attention_dropout",
+        }
+        missing_transformer_keys = required_transformer_keys - set(transformer_params.keys())
+        if missing_transformer_keys:
+            raise ValueError(
+                "Missing required transformer hyperparameters: "
+                f"{sorted(missing_transformer_keys)}"
+            )
+
+        nhead = transformer_params["nhead"]
+        if not isinstance(nhead, int) or nhead <= 0:
+            raise ValueError("'model_hyperparameters.transformer.nhead' must be a positive integer.")
+        if d_model % nhead != 0:
+            raise ValueError(f"'d_model' ({d_model}) must be divisible by 'nhead' ({nhead}).")
+
+        for positive_key in ("num_layers", "dim_feedforward"):
+            value = transformer_params[positive_key]
+            if not isinstance(value, int) or value <= 0:
+                raise ValueError(
+                    f"'model_hyperparameters.transformer.{positive_key}' must be a positive integer."
+                )
+
+        attention_dropout = transformer_params["attention_dropout"]
+        if not isinstance(attention_dropout, (int, float)):
+            raise ValueError("'model_hyperparameters.transformer.attention_dropout' must be numeric.")
+        if not (0.0 <= float(attention_dropout) <= 1.0):
+            raise ValueError(
+                "'model_hyperparameters.transformer.attention_dropout' must be in [0, 1]."
+            )
+
+    lstm_params = model_params.get("lstm")
+    if model_type == "lstm":
+        if not isinstance(lstm_params, dict):
+            raise ValueError(
+                "'model_hyperparameters.lstm' must be a dictionary when "
+                "model_type='lstm'."
+            )
+        required_lstm_keys = {"num_layers", "bidirectional"}
+        missing_lstm_keys = required_lstm_keys - set(lstm_params.keys())
+        if missing_lstm_keys:
+            raise ValueError(
+                "Missing required LSTM hyperparameters: "
+                f"{sorted(missing_lstm_keys)}"
+            )
+
+        if not isinstance(lstm_params["num_layers"], int) or lstm_params["num_layers"] <= 0:
+            raise ValueError("'model_hyperparameters.lstm.num_layers' must be a positive integer.")
+        if not isinstance(lstm_params["bidirectional"], bool):
+            raise ValueError("'model_hyperparameters.lstm.bidirectional' must be a boolean.")
+
     # training_hyperparameters
     train_params = require_section("training_hyperparameters")
     required_train_keys = {
@@ -591,6 +653,10 @@ def validate_config(config: Dict[str, Any]) -> None:
         "min_lr",
         "warmup_epochs",
         "warmup_start_factor",
+        "plateau_patience",
+        "plateau_factor",
+        "plateau_threshold",
+        "plateau_threshold_mode",
         "early_stopping_patience",
         "min_delta",
         "use_amp",
@@ -607,8 +673,11 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError(f"Only '{SUPPORTED_OPTIMIZER}' optimizer is supported.")
 
     scheduler_name = str(train_params["scheduler_type"]).lower()
-    if scheduler_name != SUPPORTED_SCHEDULER:
-        raise ValueError(f"Only '{SUPPORTED_SCHEDULER}' scheduler_type is supported.")
+    if scheduler_name not in SUPPORTED_SCHEDULERS:
+        raise ValueError(
+            "'training_hyperparameters.scheduler_type' must be one of "
+            f"{sorted(SUPPORTED_SCHEDULERS)}."
+        )
 
     if "gradient_accumulation_steps" in train_params:
         raise ValueError(
@@ -622,6 +691,8 @@ def validate_config(config: Dict[str, Any]) -> None:
             raise ValueError(
                 f"'training_hyperparameters.{positive_int_key}' must be a positive integer."
             )
+    if not isinstance(train_params["plateau_patience"], int) or train_params["plateau_patience"] <= 0:
+        raise ValueError("'training_hyperparameters.plateau_patience' must be a positive integer.")
     if not isinstance(train_params["warmup_epochs"], int):
         raise ValueError("'training_hyperparameters.warmup_epochs' must be an integer.")
 
@@ -630,6 +701,7 @@ def validate_config(config: Dict[str, Any]) -> None:
         "gradient_clip_val",
         "min_lr",
         "min_delta",
+        "plateau_threshold",
     ):
         value = train_params[non_negative_float_key]
         if not isinstance(value, (int, float)):
@@ -650,6 +722,19 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError("'training_hyperparameters.warmup_start_factor' must be numeric.")
     if not (0.0 < float(warmup_start_factor) <= 1.0):
         raise ValueError("'training_hyperparameters.warmup_start_factor' must be in (0, 1].")
+
+    plateau_factor = train_params["plateau_factor"]
+    if not isinstance(plateau_factor, (int, float)):
+        raise ValueError("'training_hyperparameters.plateau_factor' must be numeric.")
+    if not (0.0 < float(plateau_factor) < 1.0):
+        raise ValueError("'training_hyperparameters.plateau_factor' must be in (0, 1).")
+
+    plateau_threshold_mode = str(train_params["plateau_threshold_mode"]).lower()
+    if plateau_threshold_mode not in SUPPORTED_PLATEAU_THRESHOLD_MODES:
+        raise ValueError(
+            "'training_hyperparameters.plateau_threshold_mode' must be one of "
+            f"{sorted(SUPPORTED_PLATEAU_THRESHOLD_MODES)}."
+        )
 
     if not isinstance(train_params["use_amp"], bool):
         raise ValueError("'training_hyperparameters.use_amp' must be a boolean.")

@@ -643,6 +643,86 @@ class DataNormalizer:
         return result
 
     @staticmethod
+    def normalize_array(
+        x: np.ndarray, method: str, stats: Dict[str, Any], *, normalized_value_clamp: float
+    ) -> np.ndarray:
+        """Apply normalization to a NumPy array using the same math as ``normalize_tensor``."""
+        if not np.issubdtype(x.dtype, np.floating):
+            raise TypeError(
+                f"normalize_array requires a floating-point array, got {x.dtype}."
+            )
+
+        if method == "bool" or not stats:
+            return x
+
+        def to_arr(val: Any) -> np.ndarray:
+            """Convert scalar or array-like stats to the input dtype for broadcasting."""
+            return np.asarray(val, dtype=x.dtype)
+
+        result = x
+
+        try:
+            if method == "standard":
+                result = (x - to_arr(stats["mean"])) / to_arr(stats["std"])
+
+            elif method == "log-standard":
+                if np.any(x <= 0):
+                    raise ValueError("log-standard normalization received values <= 0.")
+                x_safe = np.log10(x)
+                result = (x_safe - to_arr(stats["log_mean"])) / to_arr(stats["log_std"])
+
+            elif method == "signed-log":
+                y = np.sign(x) * np.log10(np.abs(x) + 1.0)
+                result = (y - to_arr(stats["mean"])) / to_arr(stats["std"])
+
+            elif method == "log-min-max":
+                if np.any(x <= 0):
+                    raise ValueError("log-min-max normalization received values <= 0.")
+                log_x = np.log10(x)
+                denom = to_arr(stats["max"]) - to_arr(stats["min"])
+                if np.any(denom <= 0):
+                    raise ValueError("log-min-max stats have zero range")
+                normed = (log_x - to_arr(stats["min"])) / denom
+                result = np.clip(
+                    normed,
+                    to_arr(stats["clamp_min"]),
+                    to_arr(stats["clamp_max"]),
+                )
+
+            elif method == "max-out":
+                result = x / to_arr(stats["max_val"])
+
+            elif method == "iqr":
+                result = (x - to_arr(stats["median"])) / to_arr(stats["iqr"])
+
+            elif method == "scaled_signed_offset_log":
+                y = np.sign(x) * np.log10(np.abs(x) + 1.0)
+                result = y / to_arr(stats["m"])
+
+            elif method == "symlog":
+                thr = to_arr(stats["threshold"])
+                sf = to_arr(stats["scale_factor"])
+                abs_x = np.abs(x)
+                linear_mask = abs_x <= thr
+                result = np.empty_like(x)
+                result[linear_mask] = x[linear_mask] / np.broadcast_to(thr, x.shape)[linear_mask]
+                result[~linear_mask] = np.sign(x[~linear_mask]) * (
+                    np.log10(abs_x[~linear_mask] / np.broadcast_to(thr, x.shape)[~linear_mask]) + 1.0
+                )
+                result = result / sf
+
+            else:
+                raise ValueError(f"Unsupported normalization method '{method}'.")
+
+        except KeyError as e:
+            raise KeyError(f"Missing stat '{e}' for normalization method '{method}'.") from e
+
+        if method in ("standard", "log-standard", "signed-log", "iqr"):
+            result = np.clip(result, -normalized_value_clamp, normalized_value_clamp)
+
+        return result.astype(x.dtype, copy=False)
+
+    @staticmethod
     def denormalize_tensor(x: Tensor, method: str, stats: Dict[str, Any]) -> Tensor:
         """Reverse normalization on a tensor."""
         if not x.is_floating_point():

@@ -17,14 +17,13 @@ if str(SRC_DIR) not in sys.path:
 
 from generate_splits import _split_pairs
 from hardware import setup_device
-from utils import get_precision_config, load_splits, validate_config
+from utils import get_precision_config, load_config, load_splits, validate_config
 
 
 def _load_checked_in_config() -> dict:
     """Load the checked-in JSONC config as plain JSON for test mutation."""
     config_path = PROJECT_ROOT / "config" / "config.jsonc"
-    with config_path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    return load_config(config_path)
 
 
 class ConfigAndHardwareTests(unittest.TestCase):
@@ -90,6 +89,77 @@ class ConfigAndHardwareTests(unittest.TestCase):
         config["data_paths_config"]["dataset_split_fractions"]["test"] = 0.20
 
         with self.assertRaisesRegex(ValueError, "must sum to 1.0"):
+            validate_config(config)
+
+    def test_validate_config_accepts_lstm_model_type(self) -> None:
+        """LSTM configs should validate when the LSTM subsection is complete."""
+        config = copy.deepcopy(self.base_config)
+        config["model_hyperparameters"]["model_type"] = "lstm"
+
+        validate_config(config)
+
+    def test_validate_config_accepts_transformer_without_inactive_lstm_section(self) -> None:
+        """Only the active architecture section should be required."""
+        config = copy.deepcopy(self.base_config)
+        del config["model_hyperparameters"]["lstm"]
+
+        validate_config(config)
+
+    def test_validate_config_accepts_lstm_without_inactive_transformer_section(self) -> None:
+        """The inactive transformer section should not be required for LSTM runs."""
+        config = copy.deepcopy(self.base_config)
+        config["model_hyperparameters"]["model_type"] = "lstm"
+        del config["model_hyperparameters"]["transformer"]
+
+        validate_config(config)
+
+    def test_validate_config_rejects_invalid_model_type(self) -> None:
+        """Model type must be limited to the supported architecture set."""
+        config = copy.deepcopy(self.base_config)
+        config["model_hyperparameters"]["model_type"] = "cnn"
+
+        with self.assertRaisesRegex(ValueError, "model_type"):
+            validate_config(config)
+
+    def test_validate_config_rejects_missing_transformer_section(self) -> None:
+        """Transformer configs must include the transformer hyperparameter section."""
+        config = copy.deepcopy(self.base_config)
+        del config["model_hyperparameters"]["transformer"]
+
+        with self.assertRaisesRegex(ValueError, "model_hyperparameters.transformer"):
+            validate_config(config)
+
+    def test_validate_config_rejects_missing_lstm_section_for_lstm_runs(self) -> None:
+        """LSTM configs must include the LSTM hyperparameter section."""
+        config = copy.deepcopy(self.base_config)
+        config["model_hyperparameters"]["model_type"] = "lstm"
+        del config["model_hyperparameters"]["lstm"]
+
+        with self.assertRaisesRegex(ValueError, "model_hyperparameters.lstm"):
+            validate_config(config)
+
+    def test_validate_config_rejects_unsupported_scheduler_type(self) -> None:
+        """Scheduler type must be limited to the supported set."""
+        config = copy.deepcopy(self.base_config)
+        config["training_hyperparameters"]["scheduler_type"] = "onecycle"
+
+        with self.assertRaisesRegex(ValueError, "scheduler_type"):
+            validate_config(config)
+
+    def test_validate_config_rejects_invalid_plateau_factor(self) -> None:
+        """Plateau LR decay factor must stay strictly between zero and one."""
+        config = copy.deepcopy(self.base_config)
+        config["training_hyperparameters"]["plateau_factor"] = 1.0
+
+        with self.assertRaisesRegex(ValueError, "plateau_factor"):
+            validate_config(config)
+
+    def test_validate_config_rejects_invalid_plateau_threshold_mode(self) -> None:
+        """Plateau threshold mode should remain in the explicit supported set."""
+        config = copy.deepcopy(self.base_config)
+        config["training_hyperparameters"]["plateau_threshold_mode"] = "percent"
+
+        with self.assertRaisesRegex(ValueError, "plateau_threshold_mode"):
             validate_config(config)
 
     def test_split_pairs_uses_configured_fractions(self) -> None:

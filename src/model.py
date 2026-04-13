@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-model.py - Optimized transformer model with FiLM conditioning and export compatibility.
+model.py - Sequence model factory with transformer support.
 
 Architecture:
 - Transformer encoder with sinusoidal positional encoding
@@ -320,7 +320,8 @@ class PredictionModel(nn.Module):
     - Sinusoidal positional encoding
     - Export-friendly implementation
     - Proper padding mask handling (no output overwriting)
-    - Improved initialization and normalization
+    - Pre-norm transformer blocks with explicit LayerNorm at input, within
+      each residual block, and at the final encoder output
     """
 
     def __init__(
@@ -414,7 +415,7 @@ class PredictionModel(nn.Module):
                 )
             )
 
-        # Final normalization (important for stability)
+        # Final normalization keeps the encoder explicitly pre-norm.
         self.final_norm = nn.LayerNorm(d_model)
 
         # - Intermediate layer with activation and dropout
@@ -527,7 +528,8 @@ class PredictionModel(nn.Module):
         if self.initial_film is not None and global_features is not None:
             x = self.initial_film(x, global_features)
 
-        # Pass through transformer blocks
+        # The transformer remains explicitly pre-norm; each block applies
+        # LayerNorm before attention and feed-forward sublayers.
         for block in self.blocks:
             x = block(x, global_features, sequence_mask)
 
@@ -544,7 +546,7 @@ def create_prediction_model(
         config: Dict[str, Any],
         device: Optional[torch.device] = None,
         compile_model: bool = True,
-) -> PredictionModel:
+) -> nn.Module:
     """
     Create a prediction model from configuration.
 
@@ -554,33 +556,50 @@ def create_prediction_model(
         compile_model: Whether to apply torch.compile
 
     Returns:
-        Initialized PredictionModel
+        Initialized prediction model
     """
     validate_config(config)
 
     data_spec = config["data_specification"]
     model_params = config["model_hyperparameters"]
+    model_type = str(model_params["model_type"]).lower()
     precision = get_precision_config(config)
 
     if device is None:
         device = torch.device("cpu")
 
-    # Create model with explicit config parameters
-    model = PredictionModel(
-        input_dim=len(data_spec["input_variables"]),
-        global_input_dim=len(data_spec["global_variables"]),
-        output_dim=len(data_spec["target_variables"]),
-        d_model=int(model_params["d_model"]),
-        nhead=int(model_params["nhead"]),
-        num_encoder_layers=int(model_params["num_encoder_layers"]),
-        dim_feedforward=int(model_params["dim_feedforward"]),
-        dropout=float(model_params["dropout"]),
-        attention_dropout=float(model_params["attention_dropout"]),
-        max_sequence_length=int(model_params["max_sequence_length"]),
-        film_clamp=float(model_params["film_clamp"]),
-        output_head_divisor=int(model_params["output_head_divisor"]),
-        output_head_dropout_factor=float(model_params["output_head_dropout_factor"]),
-    )
+    common_kwargs = {
+        "input_dim": len(data_spec["input_variables"]),
+        "global_input_dim": len(data_spec["global_variables"]),
+        "output_dim": len(data_spec["target_variables"]),
+        "d_model": int(model_params["d_model"]),
+        "dropout": float(model_params["dropout"]),
+        "max_sequence_length": int(model_params["max_sequence_length"]),
+        "film_clamp": float(model_params["film_clamp"]),
+        "output_head_divisor": int(model_params["output_head_divisor"]),
+        "output_head_dropout_factor": float(model_params["output_head_dropout_factor"]),
+    }
+
+    if model_type == "transformer":
+        transformer_params = model_params["transformer"]
+        model = PredictionModel(
+            nhead=int(transformer_params["nhead"]),
+            num_encoder_layers=int(transformer_params["num_layers"]),
+            dim_feedforward=int(transformer_params["dim_feedforward"]),
+            attention_dropout=float(transformer_params["attention_dropout"]),
+            **common_kwargs,
+        )
+    elif model_type == "lstm":
+        from lstm_model import LSTMPredictionModel
+
+        lstm_params = model_params["lstm"]
+        model = LSTMPredictionModel(
+            num_lstm_layers=int(lstm_params["num_layers"]),
+            bidirectional=bool(lstm_params["bidirectional"]),
+            **common_kwargs,
+        )
+    else:
+        raise ValueError(f"Unsupported model_type '{model_type}'.")
 
     model.to(device=device, dtype=precision["model_dtype"])
 
@@ -616,4 +635,4 @@ def create_prediction_model(
 
     return model
 
-__all__ = ["PredictionModel", "create_prediction_model"]
+__all__ = ["FiLMLayer", "PredictionModel", "create_prediction_model"]

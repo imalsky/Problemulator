@@ -15,6 +15,13 @@ set -euo pipefail
 #SBATCH -t 48:00:00
 
 cd "$SLURM_SUBMIT_DIR"
+CONFIG_NAME="${CONFIG_NAME:-transformer}"
+CONFIG_PATH="$(pwd)/config/${CONFIG_NAME}.jsonc"
+
+if [[ ! -f "$CONFIG_PATH" ]]; then
+    echo "Error: Config not found at $CONFIG_PATH" >&2
+    exit 1
+fi
 
 # Activate Conda environment
 CONDA_EXE=$(command -v conda)
@@ -39,6 +46,7 @@ for cuda_version in cuda/12.7 cuda/12.6 cuda/12.5 cuda/12.4 cuda/12.0 cuda/11.8 
 done
 
 echo "------------------------------------------------"
+echo "Config path: $CONFIG_PATH"
 echo "Starting Python application..."
-python -u src/main.py 2>&1
+python -u src/main.py --config "$CONFIG_PATH" 2>&1
 echo "Job completed successfully."

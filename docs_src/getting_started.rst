@@ -15,7 +15,7 @@ Default configuration
 ---------------------
 
 By default, the pipeline reads project settings from
-``config/config.jsonc``. The repository also expects project-root directories
+``config/transformer.jsonc``. The repository also expects project-root directories
 such as ``data/``, ``models/``, and ``unit_tests/`` to remain alongside
 ``src/`` and ``config/``.
 

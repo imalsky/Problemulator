@@ -82,6 +82,44 @@ class AtmosphericDataset(Dataset):
         self._estimate_memory_and_load()
         
         logger.info(f"AtmosphericDataset initialized: {len(self)} samples from {dir_path} ")
+
+    def _assert_finite_array(self, array: np.ndarray, *, array_name: str, source: str) -> None:
+        """Hard-fail when processed shards contain NaN or Inf values."""
+        finite_mask = np.isfinite(array)
+        if bool(finite_mask.all()):
+            return
+
+        bad_count = int((~finite_mask).sum())
+        raise RuntimeError(
+            f"Non-finite values detected in processed {array_name} from {source} "
+            f"({bad_count} values)."
+        )
+
+    def _validate_loaded_shard(
+        self,
+        *,
+        seq_data: np.ndarray,
+        tgt_data: np.ndarray,
+        glb_data: Optional[np.ndarray],
+        shard_name: str,
+    ) -> None:
+        """Validate one processed shard after load."""
+        self._assert_finite_array(
+            seq_data,
+            array_name="sequence_inputs",
+            source=f"{self.dir_path / 'sequence_inputs' / shard_name}",
+        )
+        self._assert_finite_array(
+            tgt_data,
+            array_name="targets",
+            source=f"{self.dir_path / 'targets' / shard_name}",
+        )
+        if glb_data is not None:
+            self._assert_finite_array(
+                glb_data,
+                array_name="globals",
+                source=f"{self.dir_path / 'globals' / shard_name}",
+            )
     
     def _validate_structure(self) -> None:
         """Validate that required directories exist based on metadata."""
@@ -235,12 +273,20 @@ class AtmosphericDataset(Dataset):
                 shard_name = f"shard_{shard_idx:06d}.npy"
                 seq_data = np.load(self.dir_path / "sequence_inputs" / shard_name)
                 tgt_data = np.load(self.dir_path / "targets" / shard_name)
+                glb_data = None
+                if self.has_globals:
+                    glb_data = np.load(self.dir_path / "globals" / shard_name)
+                self._validate_loaded_shard(
+                    seq_data=seq_data,
+                    tgt_data=tgt_data,
+                    glb_data=glb_data,
+                    shard_name=shard_name,
+                )
                 n_rows = int(seq_data.shape[0])
                 end = processed + n_rows
                 self.ram_sequences[processed:end] = seq_data
                 self.ram_targets[processed:end] = tgt_data
-                if self.has_globals:
-                    glb_data = np.load(self.dir_path / "globals" / shard_name)
+                if self.has_globals and glb_data is not None:
                     self.ram_globals[processed:end] = glb_data
                 processed = end
                 if processed % 10000 == 0 or processed == n_samples:
@@ -265,9 +311,15 @@ class AtmosphericDataset(Dataset):
             # Load entire shard at once
             seq_data = np.load(self.dir_path / "sequence_inputs" / shard_name)
             tgt_data = np.load(self.dir_path / "targets" / shard_name)
-            
+            glb_data = None
             if self.has_globals:
                 glb_data = np.load(self.dir_path / "globals" / shard_name)
+            self._validate_loaded_shard(
+                seq_data=seq_data,
+                tgt_data=tgt_data,
+                glb_data=glb_data,
+                shard_name=shard_name,
+            )
             
             # Vectorized extraction from this shard
             shard_pairs = indices_by_shard[shard_idx]
@@ -277,7 +329,7 @@ class AtmosphericDataset(Dataset):
 
             self.ram_sequences[dest_idx] = seq_data[src_idx]
             self.ram_targets[dest_idx] = tgt_data[src_idx]
-            if self.has_globals:
+            if self.has_globals and glb_data is not None:
                 self.ram_globals[dest_idx] = glb_data[src_idx]
             processed += int(dest_idx.size)
             
@@ -347,6 +399,12 @@ class AtmosphericDataset(Dataset):
                 if not glb_path.exists():
                     raise RuntimeError(f"Missing globals for shard {shard_idx}")
                 shard_data["globals"] = np.load(glb_path)
+        self._validate_loaded_shard(
+            seq_data=shard_data["sequence_inputs"],
+            tgt_data=shard_data["targets"],
+            glb_data=shard_data.get("globals"),
+            shard_name=shard_name,
+        )
 
         # LRU eviction
         if len(self._shard_cache) >= self._cache_size:

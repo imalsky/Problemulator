@@ -52,7 +52,7 @@ Optimizer, scheduler, and hardware
 The current supported training policy is intentionally narrow.
 
 - Optimizer: AdamW
-- Scheduler: warmup followed by validation-driven plateau reduction by default
+- Scheduler: warmup followed by cosine decay by default
 - Model family: transformer by default, optional bidirectional LSTM baseline
 - Allowed runtime backends: CPU, MPS, CUDA
 - The checked-in default backend is CUDA so the default config aligns with the

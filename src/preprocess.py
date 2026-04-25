@@ -156,6 +156,31 @@ def _normalize_global_batch_inplace(
         )
 
 
+def _assert_finite_processed_array(
+    array: Optional[np.ndarray],
+    *,
+    array_name: str,
+    split_key: str,
+    file_stem: str,
+    chunk_start: int,
+    chunk_stop: int,
+) -> None:
+    """Hard-fail when preprocessing produces non-finite values."""
+    if array is None:
+        return
+
+    finite_mask = np.isfinite(array)
+    if bool(finite_mask.all()):
+        return
+
+    bad_count = int((~finite_mask).sum())
+    raise ValueError(
+        f"Non-finite values detected in processed {array_name} for split '{split_key}' "
+        f"from file '{file_stem}' chunk [{chunk_start}, {chunk_stop}) "
+        f"({bad_count} values)."
+    )
+
+
 def _load_and_restore_chunk(
     hf_file: h5py.File,
     variables: List[str],
@@ -657,6 +682,30 @@ def preprocess_data(
                                 global_norm_specs,
                                 normalized_value_clamp=normalized_value_clamp,
                             )
+                        _assert_finite_processed_array(
+                            seq_in_np,
+                            array_name="sequence inputs",
+                            split_key=split_key,
+                            file_stem=file_stem,
+                            chunk_start=int(chunk_idx[0]),
+                            chunk_stop=int(chunk_idx[-1]) + 1,
+                        )
+                        _assert_finite_processed_array(
+                            tgt_np,
+                            array_name="targets",
+                            split_key=split_key,
+                            file_stem=file_stem,
+                            chunk_start=int(chunk_idx[0]),
+                            chunk_stop=int(chunk_idx[-1]) + 1,
+                        )
+                        _assert_finite_processed_array(
+                            glb_np,
+                            array_name="global features",
+                            split_key=split_key,
+                            file_stem=file_stem,
+                            chunk_start=int(chunk_idx[0]),
+                            chunk_stop=int(chunk_idx[-1]) + 1,
+                        )
                         timing_totals["normalize_s"] += time.perf_counter() - normalize_start
 
                         # Write into shard buffers

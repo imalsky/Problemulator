@@ -22,8 +22,9 @@ The repository follows a few strict configuration rules:
 Current runtime defaults
 ------------------------
 
-The checked-in ``config/config.jsonc`` currently uses these baseline runtime
-settings:
+The checked-in ``config/transformer.jsonc`` currently uses these baseline runtime
+settings. A comparable bidirectional LSTM baseline is also provided in
+``config/lstm.jsonc``.
 
 .. list-table:: Runtime and training defaults
    :header-rows: 1
@@ -47,13 +48,13 @@ settings:
    * - ``training_hyperparameters.optimizer``
      - ``adamw``
    * - ``training_hyperparameters.scheduler_type``
-     - ``plateau``
+     - ``cosine``
    * - ``training_hyperparameters.learning_rate``
      - ``1e-4``
    * - ``model_hyperparameters.model_type``
      - ``transformer``
    * - ``model_hyperparameters.dropout``
-     - ``0.05``
+     - ``0.0``
 
 Architecture-specific keys
 --------------------------

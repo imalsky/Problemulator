@@ -60,23 +60,23 @@ The current checked-in configuration uses the following baseline values:
    * - ``model_hyperparameters.model_type``
      - ``transformer``
    * - ``model_hyperparameters.d_model``
-     - ``128``
+     - ``256``
    * - ``model_hyperparameters.transformer.nhead``
      - ``4``
    * - ``model_hyperparameters.transformer.num_layers``
-     - ``3``
+     - ``4``
    * - ``model_hyperparameters.transformer.dim_feedforward``
-     - ``512``
+     - ``1024``
    * - ``model_hyperparameters.dropout``
-     - ``0.05``
+     - ``0.0``
    * - ``model_hyperparameters.transformer.attention_dropout``
-     - ``0.05``
+     - ``0.0``
    * - ``model_hyperparameters.max_sequence_length``
-     - ``100``
+     - ``75``
    * - ``training_hyperparameters.learning_rate``
      - ``1e-4``
    * - ``training_hyperparameters.scheduler_type``
-     - ``plateau``
+     - ``cosine``
    * - ``training_hyperparameters.weight_decay``
      - ``1e-5``
    * - ``training_hyperparameters.gradient_clip_val``

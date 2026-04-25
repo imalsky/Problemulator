@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 import torch
+from torch import nn
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
@@ -16,6 +17,32 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from train import ModelTrainer, WarmupScheduler
+
+
+class _EchoModel(nn.Module):
+    """Minimal model stub that returns its input sequence unchanged."""
+
+    def forward(
+        self,
+        sequence: torch.Tensor,
+        global_features: torch.Tensor | None = None,
+        sequence_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del global_features, sequence_mask
+        return sequence
+
+
+class _NaNModel(nn.Module):
+    """Minimal model stub that returns NaN predictions."""
+
+    def forward(
+        self,
+        sequence: torch.Tensor,
+        global_features: torch.Tensor | None = None,
+        sequence_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del global_features, sequence_mask
+        return torch.full_like(sequence, float("nan"))
 
 
 class _NoOpAfterScheduler:
@@ -227,6 +254,54 @@ class TrainingLoggingTests(unittest.TestCase):
         self.assertEqual(trainer.best_epoch, 3)
         self.assertEqual(saved_epochs[-1], 3)
         self.assertAlmostEqual(best_val, validation_losses[-1])
+
+    def test_run_epoch_rejects_non_finite_validation_targets(self) -> None:
+        """Validation should hard-fail instead of aggregating a NaN target batch."""
+        trainer = ModelTrainer.__new__(ModelTrainer)
+        trainer.device = torch.device("cpu")
+        trainer.model = _EchoModel()
+        trainer.criterion = nn.MSELoss(reduction="none")
+        trainer._using_prefetch_loader = False
+        trainer.use_amp = False
+        trainer.amp_dtype = None
+        trainer.loss_dtype = torch.float32
+        trainer.forward_dtype = torch.float32
+
+        loader = [
+            (
+                {"sequence": torch.tensor([[[1.0], [2.0]]], dtype=torch.float32)},
+                {"sequence": torch.tensor([[False, False]])},
+                torch.tensor([[[1.0], [float("nan")]]], dtype=torch.float32),
+                torch.tensor([[False, False]]),
+            )
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "targets during validation batch 1"):
+            ModelTrainer._run_epoch(trainer, loader, is_train=False)
+
+    def test_run_epoch_rejects_non_finite_validation_predictions(self) -> None:
+        """Validation should identify model-side NaNs distinctly from data NaNs."""
+        trainer = ModelTrainer.__new__(ModelTrainer)
+        trainer.device = torch.device("cpu")
+        trainer.model = _NaNModel()
+        trainer.criterion = nn.MSELoss(reduction="none")
+        trainer._using_prefetch_loader = False
+        trainer.use_amp = False
+        trainer.amp_dtype = None
+        trainer.loss_dtype = torch.float32
+        trainer.forward_dtype = torch.float32
+
+        loader = [
+            (
+                {"sequence": torch.tensor([[[1.0], [2.0]]], dtype=torch.float32)},
+                {"sequence": torch.tensor([[False, False]])},
+                torch.tensor([[[1.0], [2.0]]], dtype=torch.float32),
+                torch.tensor([[False, False]]),
+            )
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "model predictions during validation batch 1"):
+            ModelTrainer._run_epoch(trainer, loader, is_train=False)
 
 
 if __name__ == "__main__":

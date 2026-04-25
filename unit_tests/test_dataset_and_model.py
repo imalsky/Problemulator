@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,7 +18,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from dataset import pad_collate
+from dataset import AtmosphericDataset, pad_collate
 from lstm_model import LSTMPredictionModel
 from model import FiLMLayer, PredictionModel
 
@@ -81,6 +83,49 @@ class DatasetAndModelTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "All-padding batch"):
             pad_collate(batch, padding_value=padding_value, padding_epsilon=1e-6)
+
+    def test_atmospheric_dataset_rejects_non_finite_processed_shard(self) -> None:
+        """Processed shards with NaN/Inf values should fail during dataset load."""
+        config = {
+            "miscellaneous_settings": {
+                "dataset_loading_mode": "ram",
+                "dataset_max_cached_shards": 1,
+                "dataset_large_shard_mmap_bytes": 1024,
+                "dataset_ram_safety_fraction": 1.0,
+                "dataset_copy_mmap_slices": True,
+            },
+            "data_specification": {
+                "input_variables": ["pressure_bar"],
+                "target_variables": ["net_flux"],
+                "global_variables": [],
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            split_dir = Path(tmpdir)
+            (split_dir / "sequence_inputs").mkdir(parents=True, exist_ok=True)
+            (split_dir / "targets").mkdir(parents=True, exist_ok=True)
+            metadata = {
+                "shard_size": 2,
+                "total_samples": 1,
+                "num_shards": 1,
+                "has_globals": False,
+                "sequence_length": 2,
+            }
+            with (split_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+                json.dump(metadata, handle)
+
+            np.save(
+                split_dir / "sequence_inputs" / "shard_000000.npy",
+                np.asarray([[[1.0], [np.nan]]], dtype=np.float32),
+            )
+            np.save(
+                split_dir / "targets" / "shard_000000.npy",
+                np.asarray([[[1.0], [2.0]]], dtype=np.float32),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "processed sequence_inputs"):
+                AtmosphericDataset(split_dir, config, indices=None)
 
     def test_film_layer_requires_positive_clamp(self) -> None:
         """The unreachable no-clamp branch was removed; clamp must stay positive."""

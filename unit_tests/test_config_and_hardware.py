@@ -9,20 +9,26 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import h5py
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+import main as pipeline_main
 from generate_splits import _split_pairs
 from hardware import setup_device
+from model import create_prediction_model
 from utils import get_precision_config, load_config, load_splits, validate_config
 
 
-def _load_checked_in_config() -> dict:
-    """Load the checked-in JSONC config as plain JSON for test mutation."""
-    config_path = PROJECT_ROOT / "config" / "config.jsonc"
+def _load_checked_in_config(config_name: str = "transformer") -> dict:
+    """Load one of the checked-in JSONC configs as plain JSON for test mutation."""
+    config_path = PROJECT_ROOT / "config" / f"{config_name}.jsonc"
     return load_config(config_path)
 
 
@@ -32,6 +38,7 @@ class ConfigAndHardwareTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.base_config = _load_checked_in_config()
+        cls.lstm_config = _load_checked_in_config("lstm")
 
     def test_checked_in_config_validates(self) -> None:
         """The repository default config should pass strict validation."""
@@ -43,6 +50,27 @@ class ConfigAndHardwareTests(unittest.TestCase):
             self.base_config["miscellaneous_settings"]["device_backend"],
             "cuda",
         )
+
+    def test_checked_in_configs_match_expected_parameter_counts(self) -> None:
+        """The checked-in transformer/LSTM configs should stay near paper-sized."""
+        transformer_model = create_prediction_model(
+            copy.deepcopy(self.base_config),
+            compile_model=False,
+        )
+        lstm_model = create_prediction_model(
+            copy.deepcopy(self.lstm_config),
+            compile_model=False,
+        )
+
+        transformer_params = sum(
+            parameter.numel() for parameter in transformer_model.parameters() if parameter.requires_grad
+        )
+        lstm_params = sum(
+            parameter.numel() for parameter in lstm_model.parameters() if parameter.requires_grad
+        )
+
+        self.assertEqual(transformer_params, 3199106)
+        self.assertEqual(lstm_params, 3158378)
 
     def test_validate_config_rejects_none_normalization(self) -> None:
         """Required variables may not use the removed 'none' normalization mode."""
@@ -219,6 +247,79 @@ class ConfigAndHardwareTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "Duplicate sample reference"):
                 load_splits(config, Path(tmpdir))
+
+    def test_run_normalize_recovers_from_stale_out_of_range_splits(self) -> None:
+        """Normalization should regenerate a split file that still references dropped rows."""
+        config = copy.deepcopy(self.base_config)
+        config["miscellaneous_settings"]["device_backend"] = "cpu"
+        config["miscellaneous_settings"]["torch_compile"] = False
+        config["miscellaneous_settings"]["shard_size"] = 4
+        config["miscellaneous_settings"]["hdf5_read_chunk_size"] = 2
+        config["miscellaneous_settings"]["num_workers"] = 0
+        config["model_hyperparameters"]["max_sequence_length"] = 4
+        config["data_paths_config"]["hdf5_dataset_filename"] = ["fixture.h5"]
+
+        raw_arrays = {
+            "pressure_bar": np.asarray(
+                [[1.0e-5 * (idx + 1), 1.0e-4 * (idx + 1), 1.0e-3 * (idx + 1)] for idx in range(10)],
+                dtype=np.float32,
+            ),
+            "temperature_k": np.asarray(
+                [[500.0 + idx, 600.0 + idx, 700.0 + idx] for idx in range(10)],
+                dtype=np.float32,
+            ),
+            "orbital_distance_m": np.asarray(
+                [1.0e11 + 1.0e9 * idx for idx in range(10)],
+                dtype=np.float32,
+            ),
+            "net_thermal_flux": np.asarray(
+                [[10.0 + idx, 20.0 + idx, 30.0 + idx] for idx in range(10)],
+                dtype=np.float32,
+            ),
+            "net_reflected_flux": np.asarray(
+                [[1.0 + idx, 2.0 + idx, 3.0 + idx] for idx in range(10)],
+                dtype=np.float32,
+            ),
+        }
+        stale_splits = {
+            "file_stems": ["fixture"],
+            "train": [[0, 0], [0, 10]],
+            "validation": [[0, 1]],
+            "test": [[0, 2]],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            raw_dir = data_dir / "raw"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = raw_dir / "fixture.h5"
+            processed_dir = data_dir / "processed"
+            splits_path = data_dir / "dataset_splits.json"
+
+            with h5py.File(raw_path, "w") as h5_file:
+                for key, value in raw_arrays.items():
+                    h5_file.create_dataset(key, data=value)
+
+            with splits_path.open("w", encoding="utf-8") as handle:
+                json.dump(stale_splits, handle)
+
+            with patch.object(pipeline_main, "_ensure_splits_file", return_value=splits_path):
+                splits = pipeline_main.run_normalize(config, [raw_path], processed_dir)
+
+            self.assertEqual(sum(len(splits[name]) for name in ("train", "validation", "test")), 10)
+            for split_name in ("train", "validation", "test"):
+                self.assertTrue(all(0 <= idx < 10 for _, idx in splits[split_name]))
+
+            with splits_path.open("r", encoding="utf-8") as handle:
+                regenerated_splits = json.load(handle)
+
+            max_saved_index = max(
+                sample_idx
+                for split_name in ("train", "validation", "test")
+                for _, sample_idx in regenerated_splits[split_name]
+            )
+            self.assertLess(max_saved_index, 10)
+            self.assertTrue((processed_dir / "processed_fingerprint.json").is_file())
 
     def test_setup_device_cpu_returns_cpu(self) -> None:
         """CPU backend selection should stay explicit and deterministic."""

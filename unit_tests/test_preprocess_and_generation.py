@@ -42,9 +42,9 @@ from run_picaso import (
 from utils import load_config
 
 
-def _load_checked_in_config() -> dict:
-    """Load the checked-in config for test mutation."""
-    config_path = PROJECT_ROOT / "config" / "config.jsonc"
+def _load_checked_in_config(config_name: str = "transformer") -> dict:
+    """Load one of the checked-in configs for test mutation."""
+    config_path = PROJECT_ROOT / "config" / f"{config_name}.jsonc"
     return load_config(config_path)
 
 

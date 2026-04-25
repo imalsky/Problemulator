@@ -341,19 +341,19 @@ Current policy:
   - LSTM path: bidirectional recurrent stack projected back to the shared latent width.
   - Regression head to layerwise target channels with no final activation clamp.
 - Hyperparameters are config-defined and must not be hardcoded in source.
-- Current checked-in config baseline (`config/config.jsonc`, as of March 7, 2026):
+- Current checked-in config baseline (`config/transformer.jsonc`, as of April 25, 2026):
   - `device_backend = cuda`
   - `model_type = transformer`
-  - `d_model = 128`
+  - `d_model = 256`
   - `transformer.nhead = 4`
-  - `transformer.num_layers = 3`
-  - `transformer.dim_feedforward = 512`
-  - `dropout = 0.05`
+  - `transformer.num_layers = 4`
+  - `transformer.dim_feedforward = 1024`
+  - `dropout = 0.0`
   - `epochs = 300`
   - `optimizer = AdamW`
-  - `scheduler_type = plateau`
+  - `scheduler_type = cosine`
   - `learning_rate = 1e-4`
-  - `min_lr = 1e-6`
+  - `min_lr = 1e-8`
   - `weight_decay = 1e-5`
   - `gradient_clip_val = 2.0`
 

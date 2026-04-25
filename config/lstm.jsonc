@@ -23,7 +23,7 @@
   },
   "data_paths_config": {
     "hdf5_dataset_filename": [
-      "picaso_results_1.h5"
+      "picaso_results_5M.h5"
     ],
     "dataset_splits_filename": "dataset_splits.json",
     "dataset_split_fractions": {
@@ -90,21 +90,21 @@
   },
   "model_hyperparameters": {
     // Available model types: "transformer", "lstm"
-    "model_type": "transformer",
-    "d_model": 128,
-    "dropout": 0.05,
+    "model_type": "lstm",
+    "d_model": 208,
+    "dropout": 0.0,
     "film_clamp": 10.0,
-    "max_sequence_length": 100,
+    "max_sequence_length": 75,
     "output_head_divisor": 2,
     "output_head_dropout_factor": 0.5,
     "transformer": {
       "nhead": 4,
-      "num_layers": 3,
-      "dim_feedforward": 512,
-      "attention_dropout": 0.05
+      "num_layers": 4,
+      "dim_feedforward": 1024,
+      "attention_dropout": 0.0
     },
     "lstm": {
-      "num_layers": 3,
+      "num_layers": 4,
       "bidirectional": true
     }
   },
@@ -116,8 +116,8 @@
     "optimizer": "adamw",
     "gradient_clip_val": 2.0,
     // Available schedulers: "cosine", "plateau"
-    "scheduler_type": "plateau",
-    "min_lr": 1e-06,
+    "scheduler_type": "cosine",
+    "min_lr": 1e-08,
     "warmup_epochs": 10,
     "warmup_start_factor": 0.1,
     "plateau_patience": 10,
@@ -125,12 +125,12 @@
     "plateau_threshold": 1e-05,
     // Available threshold modes: "abs", "rel"
     "plateau_threshold_mode": "abs",
-    "early_stopping_patience": 30,
-    "min_delta": 1e-06,
+    "early_stopping_patience": 300,
+    "min_delta": 0.0,
     "use_amp": false,
     "dataset_fraction_to_use": 1.0
   },
   "output_paths_config": {
-    "fixed_model_foldername": "trained_model"
+    "fixed_model_foldername": "lstm"
   }
 }

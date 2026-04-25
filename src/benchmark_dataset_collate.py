@@ -16,7 +16,7 @@ from utils import get_precision_config, load_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.jsonc"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "transformer.jsonc"
 DEFAULT_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 SPLIT_DIR_MAP = {
     "train": "train",

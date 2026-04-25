@@ -25,6 +25,19 @@ from utils import get_precision_config, save_json, seed_everything
 logger = logging.getLogger(__name__)
 
 
+def _assert_finite_tensor(tensor: torch.Tensor, *, label: str, mode: str, batch_idx: int) -> None:
+    """Raise a descriptive error when a training/eval tensor contains NaN or Inf."""
+    finite_mask = torch.isfinite(tensor)
+    if bool(finite_mask.all()):
+        return
+
+    bad_count = int((~finite_mask).sum().item())
+    raise RuntimeError(
+        f"Non-finite values detected in {label} during {mode} batch {batch_idx} "
+        f"({bad_count} values)."
+    )
+
+
 class WarmupScheduler:
     """
     Apply linear warmup before handing control to a downstream scheduler.
@@ -662,8 +675,8 @@ class ModelTrainer:
         Returns:
             Mean masked MSE over all valid target elements in the epoch
         """
+        mode = "training" if is_train else "validation"
         if len(loader) == 0:
-            mode = "training" if is_train else "validation"
             raise RuntimeError(f"DataLoader for {mode} is empty.")
         
         # Set model mode
@@ -678,7 +691,7 @@ class ModelTrainer:
         grad_context = torch.enable_grad() if is_train else torch.inference_mode()
 
         with grad_context:
-            for batch in loader:
+            for batch_idx, batch in enumerate(loader, start=1):
                 # Data already sits on the destination device when the CUDA prefetcher is active.
                 inputs, masks, targets, target_masks = batch
 
@@ -699,22 +712,60 @@ class ModelTrainer:
                     targets = targets.to(device=self.device, dtype=self.loss_dtype)
                     target_masks = target_masks.to(device=self.device)
 
+                _assert_finite_tensor(
+                    sequence,
+                    label="sequence inputs",
+                    mode=mode,
+                    batch_idx=batch_idx,
+                )
+                if global_features is not None:
+                    _assert_finite_tensor(
+                        global_features,
+                        label="global features",
+                        mode=mode,
+                        batch_idx=batch_idx,
+                    )
+                _assert_finite_tensor(
+                    targets,
+                    label="targets",
+                    mode=mode,
+                    batch_idx=batch_idx,
+                )
+
                 # Forward pass with autocast
                 with autocast(device_type=device_type, enabled=self.use_amp, dtype=self.amp_dtype):
                     predictions = self.model(sequence, global_features, sequence_mask)
                     if predictions.dtype != self.loss_dtype:
                         predictions = predictions.to(dtype=self.loss_dtype)
+                    _assert_finite_tensor(
+                        predictions,
+                        label="model predictions",
+                        mode=mode,
+                        batch_idx=batch_idx,
+                    )
 
                     # Loss is computed per element, then reduced only across valid
                     # non-padding target elements. This keeps right-padding completely
                     # out of the training objective.
                     unreduced_loss = self.criterion(predictions, targets)
+                    _assert_finite_tensor(
+                        unreduced_loss,
+                        label="unreduced loss",
+                        mode=mode,
+                        batch_idx=batch_idx,
+                    )
                     valid_steps = ~target_masks
                     valid_step_mask = valid_steps.unsqueeze(-1)
                     masked_loss_sum = unreduced_loss.masked_fill(~valid_step_mask, 0).sum()
                     num_valid_elements = valid_steps.sum(dtype=torch.int64) * unreduced_loss.shape[-1]
                     zero_valid_batches += (num_valid_elements == 0).to(dtype=torch.int64)
                     loss = masked_loss_sum / num_valid_elements.clamp_min(1).to(dtype=self.loss_dtype)
+                    _assert_finite_tensor(
+                        loss.reshape(1),
+                        label="masked loss",
+                        mode=mode,
+                        batch_idx=batch_idx,
+                    )
 
                 if is_train:
                     if self.use_amp:

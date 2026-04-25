@@ -35,7 +35,7 @@ from utils import (
 # Default paths are anchored to project root (sibling of src/, config/, unit_tests/),
 # not the process working directory.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.jsonc"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "transformer.jsonc"
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_MODELS_DIR = PROJECT_ROOT / "models"
 PROCESSED_FINGERPRINT_FILENAME = "processed_fingerprint.json"
@@ -265,18 +265,97 @@ def _can_reuse_processed_data(
     return _compare_processed_fingerprints(expected=expected, existing=existing)
 
 
+def _max_split_index_per_stem(
+    existing: Dict[str, Any], stems: List[str]
+) -> Dict[str, int]:
+    """Return the largest sample index referenced for each stem in the splits file."""
+    max_index: Dict[str, int] = {stem: -1 for stem in stems}
+    for split_name in ("train", "validation", "test"):
+        items = existing.get(split_name, []) or []
+        for item in items:
+            if not isinstance(item, list) or len(item) != 2:
+                continue
+            stem_idx, sample_idx = item
+            if not isinstance(stem_idx, int) or not isinstance(sample_idx, int):
+                continue
+            if stem_idx < 0 or stem_idx >= len(stems):
+                continue
+            stem = stems[stem_idx]
+            if sample_idx > max_index[stem]:
+                max_index[stem] = sample_idx
+    return max_index
+
+
+def _row_count_per_stem(
+    config: Dict[str, Any], data_root_dir: Path, stems: List[str]
+) -> Dict[str, int]:
+    """Read the leading-dim row count for each configured raw HDF5 file."""
+    import h5py
+
+    profile_key = str(config["data_specification"]["input_variables"][0])
+    raw_dir = data_root_dir / "raw"
+    counts: Dict[str, int] = {}
+    for filename in config["data_paths_config"]["hdf5_dataset_filename"]:
+        path = raw_dir / filename
+        if not path.is_file():
+            continue
+        stem = Path(filename).stem
+        if stem not in stems:
+            continue
+        with h5py.File(path, "r", swmr=True, libver="latest") as hf:
+            if profile_key in hf:
+                counts[stem] = int(hf[profile_key].shape[0])
+    return counts
+
+
 def _ensure_splits_file(config: Dict[str, Any], data_root_dir: Path) -> Path:
-    """Ensure configured splits file exists; auto-generate if missing."""
+    """Ensure splits file exists and matches the configured raw HDF5 files."""
     splits_filename = get_config_str(
         config, "data_paths_config", "dataset_splits_filename", "dataset splits"
     )
     splits_path = data_root_dir / splits_filename
-    if splits_path.is_file():
+
+    h5_filenames = config["data_paths_config"]["hdf5_dataset_filename"]
+    configured_stems = {Path(name).stem for name in h5_filenames}
+
+    regenerate_reason: str | None = None
+    if not splits_path.is_file():
+        regenerate_reason = "splits file is missing"
+    else:
+        try:
+            existing = _load_json_dict(splits_path)
+            existing_stems = list(existing.get("file_stems", []) or [])
+        except Exception as exc:
+            regenerate_reason = f"could not read existing splits file ({exc})"
+            existing_stems = []
+        if regenerate_reason is None and set(existing_stems) != configured_stems:
+            regenerate_reason = (
+                f"splits file stems {sorted(existing_stems)} do not match "
+                f"configured raw file stems {sorted(configured_stems)}"
+            )
+        if regenerate_reason is None:
+            try:
+                max_index_per_stem = _max_split_index_per_stem(existing, existing_stems)
+                row_count_per_stem = _row_count_per_stem(config, data_root_dir, existing_stems)
+            except Exception as exc:
+                regenerate_reason = f"could not validate splits against raw files ({exc})"
+            else:
+                for stem, max_idx in max_index_per_stem.items():
+                    available = row_count_per_stem.get(stem, 0)
+                    if max_idx >= available:
+                        regenerate_reason = (
+                            f"splits reference index {max_idx} for stem '{stem}' but the "
+                            f"raw file now has only {available} rows"
+                        )
+                        break
+
+    if regenerate_reason is None:
         return splits_path
 
     logger.warning(
-        "Missing required splits file %s; generating automatically from configured raw files.",
+        "Regenerating splits file %s: %s.",
         splits_path,
+        regenerate_reason,
     )
     generated_path = generate_splits_from_config(config=config, data_dir=data_root_dir)
     if generated_path.resolve() != splits_path.resolve():
@@ -312,6 +391,11 @@ def _get_raw_hdf5_paths(config: Dict[str, Any], raw_dir: Path) -> List[Path]:
         raise FileNotFoundError(f"Missing raw HDF5 files: {missing}")
     
     return raw_paths
+
+
+def _is_out_of_range_split_error(exc: Exception) -> bool:
+    """Return whether an exception reflects stale split indices against raw files."""
+    return isinstance(exc, ValueError) and "Out-of-range index in split" in str(exc)
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -400,12 +484,30 @@ def run_normalize(
             )
 
     # Run preprocessing
-    preprocess_data(
-        config=config,
-        raw_hdf5_paths=raw_hdf5_paths,
-        splits=splits,
-        processed_dir=processed_dir,
-    )
+    try:
+        preprocess_data(
+            config=config,
+            raw_hdf5_paths=raw_hdf5_paths,
+            splits=splits,
+            processed_dir=processed_dir,
+        )
+    except Exception as exc:
+        if not _is_out_of_range_split_error(exc):
+            raise
+
+        logger.warning(
+            "Regenerating splits file %s after stale index validation failure: %s",
+            splits_path,
+            exc,
+        )
+        splits_path = generate_splits_from_config(config=config, data_dir=processed_dir.parent)
+        splits, splits_path = load_splits(config, processed_dir.parent)
+        preprocess_data(
+            config=config,
+            raw_hdf5_paths=raw_hdf5_paths,
+            splits=splits,
+            processed_dir=processed_dir,
+        )
 
     fingerprint = _build_processed_fingerprint(config, raw_hdf5_paths, splits_path)
     fingerprint_path = processed_dir / PROCESSED_FINGERPRINT_FILENAME

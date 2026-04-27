@@ -1,0 +1,136 @@
+{
+  "miscellaneous_settings": {
+    "random_seed": 42,
+    "num_workers": 1,
+    "detect_anomaly": false,
+    "shard_size": 10000,
+    "hdf5_read_chunk_size": 8192,
+    // Available backends: "cuda", "mps", "cpu"
+    "device_backend": "cuda",
+    "torch_compile": false,
+    // Available compile modes: "default", "reduce-overhead",
+    // "max-autotune", "max-autotune-no-cudagraphs"
+    "compile_mode": "default",
+    // Available modes: "normalize", "train"
+    "execution_mode": "train",
+    "rebuild_processed_data": false,
+    // Available dataset loading modes: "auto", "ram", "disk"
+    "dataset_loading_mode": "auto",
+    "dataset_max_cached_shards": 200,
+    "dataset_large_shard_mmap_bytes": 52428800,
+    "dataset_ram_safety_fraction": 0.8,
+    "dataset_copy_mmap_slices": true
+  },
+  "data_paths_config": {
+    "hdf5_dataset_filename": [
+      "picaso_results_5M.h5"
+    ],
+    "dataset_splits_filename": "dataset_splits.json",
+    "dataset_split_fractions": {
+      "train": 0.7,
+      "validation": 0.15,
+      "test": 0.15
+    }
+  },
+  "data_specification": {
+    "input_variables": [
+      "pressure_bar",
+      "temperature_k"
+    ],
+    "global_variables": [
+      "orbital_distance_m"
+    ],
+    "target_variables": [
+      "net_thermal_flux",
+      "net_reflected_flux"
+    ],
+    "strictly_positive_variables": [
+      "pressure_bar",
+      "temperature_k",
+      "orbital_distance_m"
+    ],
+    "variable_units": {
+      "pressure_bar": "bar",
+      "temperature_k": "K",
+      "orbital_distance_m": "m",
+      "net_thermal_flux": "erg cm^-2 s^-1",
+      "net_reflected_flux": "erg cm^-2 s^-1"
+    },
+    "padding_value": -9999.0
+  },
+  "normalization": {
+    "key_methods": {
+      "pressure_bar": "log-min-max",
+      "temperature_k": "standard",
+      "orbital_distance_m": "log-standard",
+      "net_thermal_flux": "symlog",
+      "net_reflected_flux": "symlog"
+    },
+    "epsilon": 1e-9,
+    "padding_comparison_epsilon": 1e-6,
+    "normalized_value_clamp": 50.0,
+    "log_min_max_clamp_min": 0.0,
+    "log_min_max_clamp_max": 1.0,
+    "symlog_min_threshold_multiplier": 100.0,
+    "stats_max_block_bytes": 536870912,
+    "stats_max_span_multiplier": 16,
+    "stats_chunk_size": 4096,
+    "quantile_max_values_in_memory": 100000,
+    "symlog_percentile": 0.01
+  },
+  "precision": {
+    "input_dtype": "float32",
+    "stats_accumulation_dtype": "float32",
+    "model_dtype": "float32",
+    "forward_dtype": "float32",
+    "loss_dtype": "float32",
+    "optimizer_state_dtype": "float32",
+    "amp_autocast_dtype": "none",
+    "float32_matmul_precision": "high"
+  },
+  "model_hyperparameters": {
+    // Available model types: "transformer", "lstm"
+    "model_type": "transformer",
+    "d_model": 256,
+    "dropout": 0.0,
+    "film_clamp": 1000.0,
+    "max_sequence_length": 75,
+    "output_head_divisor": 2,
+    "output_head_dropout_factor": 0.5,
+    "transformer": {
+      "nhead": 4,
+      "num_layers": 4,
+      "dim_feedforward": 1024,
+      "attention_dropout": 0.0
+    },
+    "lstm": {
+      "num_layers": 3,
+      "bidirectional": true
+    }
+  },
+  "training_hyperparameters": {
+    "epochs": 300,
+    "batch_size": 256,
+    "learning_rate": 0.0001,
+    "weight_decay": 1e-05,
+    "optimizer": "adamw",
+    "gradient_clip_val": 2.0,
+    // Available schedulers: "cosine", "plateau"
+    "scheduler_type": "cosine",
+    "min_lr": 1e-08,
+    "warmup_epochs": 10,
+    "warmup_start_factor": 0.1,
+    "plateau_patience": 10,
+    "plateau_factor": 0.5,
+    "plateau_threshold": 1e-05,
+    // Available threshold modes: "abs", "rel"
+    "plateau_threshold_mode": "abs",
+    "early_stopping_patience": 300,
+    "min_delta": 0.0,
+    "use_amp": false,
+    "dataset_fraction_to_use": 1.0
+  },
+  "output_paths_config": {
+    "fixed_model_foldername": "transformer_v2"
+  }
+}

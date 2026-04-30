@@ -69,7 +69,9 @@ class ConfigAndHardwareTests(unittest.TestCase):
             parameter.numel() for parameter in lstm_model.parameters() if parameter.requires_grad
         )
 
-        self.assertEqual(transformer_params, 3199106)
+        # Updated for QK-Norm + SwiGLU FFN defaults: explicit Q/K/V/out
+        # projections, per-head Q/K LayerNorms, and a 3-matrix gated FFN.
+        self.assertEqual(transformer_params, 4252802)
         self.assertEqual(lstm_params, 3158378)
 
     def test_validate_config_rejects_none_normalization(self) -> None:
@@ -90,6 +92,10 @@ class ConfigAndHardwareTests(unittest.TestCase):
         config["precision"]["forward_dtype"] = "float64"
         config["precision"]["loss_dtype"] = "float64"
         config["precision"]["optimizer_state_dtype"] = "float64"
+        # AMP is on by default in the checked-in config; it requires fp32, so
+        # disable it here to isolate the MPS/float64 rejection path.
+        config["precision"]["amp_autocast_dtype"] = "none"
+        config["training_hyperparameters"]["use_amp"] = False
 
         with self.assertRaisesRegex(ValueError, "MPS backend does not support float64"):
             get_precision_config(config)
@@ -258,6 +264,10 @@ class ConfigAndHardwareTests(unittest.TestCase):
         config["miscellaneous_settings"]["num_workers"] = 0
         config["model_hyperparameters"]["max_sequence_length"] = 4
         config["data_paths_config"]["hdf5_dataset_filename"] = ["fixture.h5"]
+        # AMP is on by default in the checked-in config but only valid for CUDA;
+        # disable it for the CPU-backed normalization path tested here.
+        config["precision"]["amp_autocast_dtype"] = "none"
+        config["training_hyperparameters"]["use_amp"] = False
 
         raw_arrays = {
             "pressure_bar": np.asarray(

@@ -64,6 +64,9 @@ class PreprocessAndGenerationTests(unittest.TestCase):
         config["miscellaneous_settings"]["hdf5_read_chunk_size"] = 1
         config["miscellaneous_settings"]["num_workers"] = 0
         config["model_hyperparameters"]["max_sequence_length"] = 4
+        # AMP requires device_backend='cuda'; disable it for the CPU fixture.
+        config["training_hyperparameters"]["use_amp"] = False
+        config["precision"]["amp_autocast_dtype"] = "none"
         return config
 
     def test_preprocess_data_preserves_schema_padding_and_normalized_values(self) -> None:

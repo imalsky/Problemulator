@@ -620,6 +620,26 @@ def validate_config(config: Dict[str, Any]) -> None:
                 "'model_hyperparameters.transformer.attention_dropout' must be in [0, 1]."
             )
 
+        # Optional architecture switches (all default to the legacy behaviour).
+        if "use_qk_norm" in transformer_params and not isinstance(
+            transformer_params["use_qk_norm"], bool
+        ):
+            raise ValueError(
+                "'model_hyperparameters.transformer.use_qk_norm' must be a boolean."
+            )
+        if "qkv_bias" in transformer_params and not isinstance(
+            transformer_params["qkv_bias"], bool
+        ):
+            raise ValueError(
+                "'model_hyperparameters.transformer.qkv_bias' must be a boolean."
+            )
+        if "ffn_type" in transformer_params:
+            ffn_type = str(transformer_params["ffn_type"]).lower()
+            if ffn_type not in {"gelu", "swiglu"}:
+                raise ValueError(
+                    "'model_hyperparameters.transformer.ffn_type' must be 'gelu' or 'swiglu'."
+                )
+
     lstm_params = model_params.get("lstm")
     if model_type == "lstm":
         if not isinstance(lstm_params, dict):
@@ -738,6 +758,30 @@ def validate_config(config: Dict[str, Any]) -> None:
 
     if not isinstance(train_params["use_amp"], bool):
         raise ValueError("'training_hyperparameters.use_amp' must be a boolean.")
+
+    # Optional AdamW betas. Defaults to the modern transformer convention
+    # (0.9, 0.95) when omitted in the config.
+    for beta_key in ("adam_beta1", "adam_beta2"):
+        if beta_key in train_params:
+            beta_value = train_params[beta_key]
+            if not isinstance(beta_value, (int, float)):
+                raise ValueError(f"'training_hyperparameters.{beta_key}' must be numeric.")
+            if not (0.0 < float(beta_value) < 1.0):
+                raise ValueError(f"'training_hyperparameters.{beta_key}' must be in (0, 1).")
+
+    if "warmup_unit" in train_params:
+        warmup_unit_value = str(train_params["warmup_unit"]).lower()
+        if warmup_unit_value not in {"epoch", "step"}:
+            raise ValueError(
+                "'training_hyperparameters.warmup_unit' must be 'epoch' or 'step'."
+            )
+
+    if "ema_decay" in train_params:
+        ema_value = train_params["ema_decay"]
+        if not isinstance(ema_value, (int, float)):
+            raise ValueError("'training_hyperparameters.ema_decay' must be numeric.")
+        if not (0.0 <= float(ema_value) < 1.0):
+            raise ValueError("'training_hyperparameters.ema_decay' must be in [0, 1).")
 
     warmup_epochs = int(train_params["warmup_epochs"])
     epochs = int(train_params["epochs"])

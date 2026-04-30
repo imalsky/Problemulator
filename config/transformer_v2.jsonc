@@ -85,14 +85,14 @@
     "forward_dtype": "float32",
     "loss_dtype": "float32",
     "optimizer_state_dtype": "float32",
-    "amp_autocast_dtype": "none",
+    "amp_autocast_dtype": "bfloat16",
     "float32_matmul_precision": "high"
   },
   "model_hyperparameters": {
     // Available model types: "transformer", "lstm"
     "model_type": "transformer",
     "d_model": 256,
-    "dropout": 0.0,
+    "dropout": 0.1,
     "film_clamp": 1000.0,
     "max_sequence_length": 75,
     "output_head_divisor": 2,
@@ -101,7 +101,15 @@
       "nhead": 4,
       "num_layers": 4,
       "dim_feedforward": 1024,
-      "attention_dropout": 0.0
+      "attention_dropout": 0.1,
+      // QK-Norm (Henry et al. 2020): per-head LayerNorm on Q and K before SDPA.
+      "use_qk_norm": true,
+      // Bias on Q/K/V/out projections; modern practice keeps these on for
+      // small models. Set false to drop them.
+      "qkv_bias": true,
+      // FFN variant: "gelu" = Linear-GELU-Linear (original),
+      // "swiglu" = LLaMA/PaLM-style gated FFN.
+      "ffn_type": "swiglu"
     },
     "lstm": {
       "num_layers": 3,
@@ -112,22 +120,32 @@
     "epochs": 300,
     "batch_size": 256,
     "learning_rate": 0.0001,
-    "weight_decay": 1e-05,
+    "weight_decay": 0.05,
     "optimizer": "adamw",
+    // AdamW betas: (0.9, 0.95) is the GPT-3/LLaMA/PaLM convention for
+    // transformers and adapts faster than the PyTorch default (0.9, 0.999).
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.95,
     "gradient_clip_val": 2.0,
     // Available schedulers: "cosine", "plateau"
     "scheduler_type": "cosine",
     "min_lr": 1e-08,
     "warmup_epochs": 10,
     "warmup_start_factor": 0.1,
+    // Warmup granularity: "epoch" (legacy, one LR step per epoch) or "step"
+    // (per optimizer step — smoother, modern default).
+    "warmup_unit": "step",
     "plateau_patience": 10,
     "plateau_factor": 0.5,
     "plateau_threshold": 1e-05,
     // Available threshold modes: "abs", "rel"
     "plateau_threshold_mode": "abs",
-    "early_stopping_patience": 300,
-    "min_delta": 0.0,
-    "use_amp": false,
+    "early_stopping_patience": 30,
+    "min_delta": 1e-05,
+    "use_amp": true,
+    // Polyak averaging (EMA) of model weights. ``0`` disables; ``0.999`` is
+    // the canonical default for vision/regression checkpoints.
+    "ema_decay": 0.999,
     "dataset_fraction_to_use": 1.0
   },
   "output_paths_config": {

@@ -26,6 +26,7 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 from utils import get_precision_config, validate_config
@@ -150,6 +151,9 @@ class DecomposedTransformerEncoderLayer(nn.Module):
             dropout: float = 0.1,
             attention_dropout: float = 0.1,
             batch_first: bool = True,
+            use_qk_norm: bool = False,
+            qkv_bias: bool = True,
+            ffn_type: str = "gelu",
     ) -> None:
         """
         Initialize transformer encoder layer.
@@ -161,23 +165,49 @@ class DecomposedTransformerEncoderLayer(nn.Module):
             dropout: Dropout probability for feedforward and residual
             attention_dropout: Dropout probability for attention
             batch_first: If True, expect batch dimension first
+            use_qk_norm: Apply LayerNorm to per-head Q and K before SDPA
+                (Henry et al. 2020). Stabilises attention logits.
+            qkv_bias: Include bias on Q/K/V/out projections.
+            ffn_type: "gelu" for the original Linear-GELU-Linear FFN,
+                "swiglu" for the gated variant used in LLaMA / PaLM.
         """
         super().__init__()
+        if not batch_first:
+            raise ValueError("batch_first=False is not supported.")
+        if d_model % nhead != 0:
+            raise ValueError(f"d_model ({d_model}) must be divisible by nhead ({nhead}).")
+        ffn_type_norm = str(ffn_type).lower()
+        if ffn_type_norm not in {"gelu", "swiglu"}:
+            raise ValueError(f"ffn_type must be 'gelu' or 'swiglu' (got '{ffn_type}').")
 
-        # Multi-head attention with separate dropout
-        self.self_attn = nn.MultiheadAttention(
-            d_model,
-            nhead,
-            dropout=attention_dropout,  # Use separate attention dropout
-            batch_first=batch_first
-        )
+        self.d_model = d_model
+        self.nhead = nhead
+        self.head_dim = d_model // nhead
+        self.attention_dropout = float(attention_dropout)
+        self.use_qk_norm = bool(use_qk_norm)
+        self.ffn_type = ffn_type_norm
 
-        # Feed-forward network
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        # Explicit Q/K/V/out projections so we can plug in QK-Norm and SDPA
+        # directly (replacing nn.MultiheadAttention).
+        self.q_proj = nn.Linear(d_model, d_model, bias=qkv_bias)
+        self.k_proj = nn.Linear(d_model, d_model, bias=qkv_bias)
+        self.v_proj = nn.Linear(d_model, d_model, bias=qkv_bias)
+        self.out_proj = nn.Linear(d_model, d_model, bias=qkv_bias)
 
-        # The checked-in architecture uses GELU consistently.
-        self.activation = nn.GELU()
+        if self.use_qk_norm:
+            self.q_norm = nn.LayerNorm(self.head_dim)
+            self.k_norm = nn.LayerNorm(self.head_dim)
+
+        # Feed-forward network. Both variants land back in ``d_model`` and use
+        # ``self.dropout`` between the activation and the down-projection so
+        # the existing dropout knob keeps working unchanged.
+        if self.ffn_type == "gelu":
+            self.linear1 = nn.Linear(d_model, dim_feedforward)
+            self.linear2 = nn.Linear(dim_feedforward, d_model)
+            self.activation = nn.GELU()
+        else:
+            self.swiglu_in = nn.Linear(d_model, 2 * dim_feedforward)
+            self.swiglu_out = nn.Linear(dim_feedforward, d_model)
 
         # Normalization layers
         self.norm1 = nn.LayerNorm(d_model)
@@ -192,12 +222,70 @@ class DecomposedTransformerEncoderLayer(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        """Initialize weights."""
-        # Initialize feedforward weights
-        nn.init.xavier_uniform_(self.linear1.weight, gain=math.sqrt(2))
-        nn.init.xavier_uniform_(self.linear2.weight)
-        nn.init.zeros_(self.linear1.bias)
-        nn.init.zeros_(self.linear2.bias)
+        """Initialize weights for attention and feed-forward sub-layers."""
+        for proj in (self.q_proj, self.k_proj, self.v_proj):
+            nn.init.xavier_uniform_(proj.weight)
+            if proj.bias is not None:
+                nn.init.zeros_(proj.bias)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+        if self.out_proj.bias is not None:
+            nn.init.zeros_(self.out_proj.bias)
+
+        if self.ffn_type == "gelu":
+            nn.init.xavier_uniform_(self.linear1.weight, gain=math.sqrt(2))
+            nn.init.xavier_uniform_(self.linear2.weight)
+            nn.init.zeros_(self.linear1.bias)
+            nn.init.zeros_(self.linear2.bias)
+        else:
+            # SwiGLU: gate path uses SiLU (x * sigmoid(x)); xavier with the
+            # default unit gain matches Shazeer's GLU-variants ablation.
+            nn.init.xavier_uniform_(self.swiglu_in.weight)
+            nn.init.xavier_uniform_(self.swiglu_out.weight)
+            nn.init.zeros_(self.swiglu_in.bias)
+            nn.init.zeros_(self.swiglu_out.bias)
+
+    def _attention(
+            self,
+            x: Tensor,
+            src_key_padding_mask: Optional[Tensor],
+    ) -> Tensor:
+        """Run the QKV projection, optional QK-Norm, and SDPA attention."""
+        bsz, seq_len, _ = x.shape
+
+        q = self.q_proj(x).view(bsz, seq_len, self.nhead, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(bsz, seq_len, self.nhead, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(bsz, seq_len, self.nhead, self.head_dim).transpose(1, 2)
+
+        if self.use_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        # SDPA boolean masks: True = participate, False = masked out. The
+        # incoming ``src_key_padding_mask`` uses True = padding (PyTorch
+        # convention), so invert and broadcast over heads and queries.
+        attn_mask: Optional[Tensor] = None
+        if src_key_padding_mask is not None:
+            attn_mask = (~src_key_padding_mask).view(bsz, 1, 1, seq_len)
+
+        attn_out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=self.attention_dropout if self.training else 0.0,
+            is_causal=False,
+        )
+
+        attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_model)
+        return self.out_proj(attn_out)
+
+    def _feed_forward(self, x: Tensor) -> Tensor:
+        """Apply the configured FFN variant."""
+        if self.ffn_type == "gelu":
+            return self.linear2(self.dropout(self.activation(self.linear1(x))))
+        # SwiGLU: gate = SiLU(W1 x), up = W2 x, out = W3(gate * up).
+        gate, up = self.swiglu_in(x).chunk(2, dim=-1)
+        return self.swiglu_out(self.dropout(F.silu(gate) * up))
 
     def forward(
             self,
@@ -210,28 +298,26 @@ class DecomposedTransformerEncoderLayer(nn.Module):
 
         Args:
             src: Source sequence (batch, seq_len, d_model)
-            src_mask: Attention mask (optional)
+            src_mask: Reserved for compatibility (must be None for SDPA path)
             src_key_padding_mask: Padding mask where True = padding position
 
         Returns:
             Transformed sequence
         """
-        # Pre-norm transformer block:
-        # src: [batch, seq_len, d_model]
-        # src_key_padding_mask: [batch, seq_len], True for padding.
+        if src_mask is not None:
+            raise ValueError(
+                "DecomposedTransformerEncoderLayer no longer accepts src_mask; "
+                "use src_key_padding_mask for padding."
+            )
+
         x = src
 
         x2 = self.norm1(x)
-        x2, _ = self.self_attn(
-            x2, x2, x2,
-            attn_mask=src_mask,
-            key_padding_mask=src_key_padding_mask,
-            need_weights=False
-        )
+        x2 = self._attention(x2, src_key_padding_mask)
         x = x + self.dropout1(x2)
 
         x2 = self.norm2(x)
-        x2 = self.linear2(self.dropout(self.activation(self.linear1(x2))))
+        x2 = self._feed_forward(x2)
         x = x + self.dropout2(x2)
 
         return x
@@ -253,6 +339,9 @@ class TransformerBlock(nn.Module):
             attention_dropout: float,
             global_input_dim: int,
             film_clamp: float = 2.0,
+            use_qk_norm: bool = False,
+            qkv_bias: bool = True,
+            ffn_type: str = "gelu",
     ) -> None:
         """
         Initialize transformer block with optional FiLM.
@@ -265,6 +354,9 @@ class TransformerBlock(nn.Module):
             attention_dropout: Attention dropout probability
             global_input_dim: Dimension of global features (0 for no FiLM)
             film_clamp: Clamping value for FiLM parameters
+            use_qk_norm: Forwarded to the encoder layer.
+            qkv_bias: Forwarded to the encoder layer.
+            ffn_type: Forwarded to the encoder layer.
         """
         super().__init__()
 
@@ -278,6 +370,9 @@ class TransformerBlock(nn.Module):
             dropout=dropout,
             attention_dropout=attention_dropout,
             batch_first=True,
+            use_qk_norm=use_qk_norm,
+            qkv_bias=qkv_bias,
+            ffn_type=ffn_type,
         )
 
         # Optional FiLM layer
@@ -339,6 +434,9 @@ class PredictionModel(nn.Module):
             film_clamp: float,
             output_head_divisor: int,
             output_head_dropout_factor: float,
+            use_qk_norm: bool = False,
+            qkv_bias: bool = True,
+            ffn_type: str = "gelu",
     ) -> None:
         """
         Initialize prediction model.
@@ -412,6 +510,9 @@ class PredictionModel(nn.Module):
                     attention_dropout=attention_dropout,
                     global_input_dim=global_input_dim,
                     film_clamp=film_clamp,
+                    use_qk_norm=use_qk_norm,
+                    qkv_bias=qkv_bias,
+                    ffn_type=ffn_type,
                 )
             )
 
@@ -440,15 +541,21 @@ class PredictionModel(nn.Module):
 
     def _init_weights(self) -> None:
         """Initialize weights"""
+        # Submodules whose linears are already initialized inside their owning
+        # module (FiLM gates, the encoder layer's QKV / out / FFN projections).
+        transformer_owned = {
+            "linear1", "linear2",          # GELU FFN
+            "swiglu_in", "swiglu_out",     # SwiGLU FFN
+            "q_proj", "k_proj", "v_proj", "out_proj",  # Attention
+        }
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
-                if (
-                    name == "initial_film.projection"
-                    or name.endswith(".film.projection")
-                    or name.endswith(".transformer.linear1")
-                    or name.endswith(".transformer.linear2")
-                ):
+                if name == "initial_film.projection" or name.endswith(".film.projection"):
                     continue
+                if ".transformer." in name:
+                    leaf = name.rsplit(".transformer.", 1)[1]
+                    if leaf in transformer_owned:
+                        continue
 
                 # Check if this is the final output layer
                 if name == "output_proj.4":
@@ -587,6 +694,9 @@ def create_prediction_model(
             num_encoder_layers=int(transformer_params["num_layers"]),
             dim_feedforward=int(transformer_params["dim_feedforward"]),
             attention_dropout=float(transformer_params["attention_dropout"]),
+            use_qk_norm=bool(transformer_params.get("use_qk_norm", False)),
+            qkv_bias=bool(transformer_params.get("qkv_bias", True)),
+            ffn_type=str(transformer_params.get("ffn_type", "gelu")).lower(),
             **common_kwargs,
         )
     elif model_type == "lstm":

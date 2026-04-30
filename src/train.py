@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 import torch
 from torch import nn, optim
 from torch.amp import GradScaler, autocast
@@ -42,10 +43,16 @@ class WarmupScheduler:
     """
     Apply linear warmup before handing control to a downstream scheduler.
 
-    The wrapped scheduler can be either step-based (for example cosine) or
-    metric-based (for example ReduceLROnPlateau). Warmup updates happen after
-    each epoch so the logged learning rate always reflects the value used
-    during that epoch.
+    Supports two warmup granularities:
+
+    * ``warmup_unit="epoch"``: LR is updated once per epoch via :meth:`step`.
+      Matches the historical behaviour.
+    * ``warmup_unit="step"``: LR is updated every optimizer step via
+      :meth:`step_batch`. The downstream scheduler is held back until warmup
+      completes, so cosine annealing only sees the final ``T_max`` epochs.
+
+    The wrapped scheduler can be either step-based (cosine) or metric-based
+    (ReduceLROnPlateau).
     """
 
     def __init__(
@@ -55,31 +62,64 @@ class WarmupScheduler:
         warmup_start_factor: float,
         after_scheduler: torch.optim.lr_scheduler.LRScheduler | ReduceLROnPlateau,
         after_scheduler_requires_metric: bool,
+        warmup_unit: str = "epoch",
+        steps_per_epoch: Optional[int] = None,
     ) -> None:
+        unit = str(warmup_unit).lower()
+        if unit not in {"epoch", "step"}:
+            raise ValueError(f"warmup_unit must be 'epoch' or 'step' (got '{warmup_unit}').")
+        if unit == "step" and (steps_per_epoch is None or int(steps_per_epoch) <= 0):
+            raise ValueError("warmup_unit='step' requires a positive steps_per_epoch.")
+
         self.optimizer = optimizer
         self.warmup_epochs = int(warmup_epochs)
         self.warmup_start_factor = float(warmup_start_factor)
         self.after_scheduler = after_scheduler
         self.after_scheduler_requires_metric = after_scheduler_requires_metric
-        self.completed_epochs = 0
+        self.warmup_unit = unit
+        self.steps_per_epoch = int(steps_per_epoch) if steps_per_epoch else 0
+
+        if unit == "step":
+            self.warmup_total = self.warmup_epochs * self.steps_per_epoch
+        else:
+            self.warmup_total = self.warmup_epochs
+
+        self.completed = 0
         self.base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
 
-        if self.warmup_epochs > 0:
+        if self.warmup_total > 0:
             self._set_warmup_lr(0)
 
-    def _set_warmup_lr(self, completed_warmup_epochs: int) -> None:
+    @property
+    def in_warmup(self) -> bool:
+        return self.completed < self.warmup_total
+
+    def _set_warmup_lr(self, completed_warmup: int) -> None:
         """Set optimizer learning rates for the current warmup progress."""
-        progress = completed_warmup_epochs / self.warmup_epochs
+        progress = completed_warmup / max(self.warmup_total, 1)
         factor = self.warmup_start_factor + (1.0 - self.warmup_start_factor) * progress
         for group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
             group["lr"] = base_lr * factor
 
-    def step(self, metric: Optional[float] = None) -> None:
-        """Advance warmup or the wrapped scheduler by one epoch."""
-        if self.completed_epochs < self.warmup_epochs:
-            self.completed_epochs += 1
-            self._set_warmup_lr(self.completed_epochs)
+    def step_batch(self) -> None:
+        """Advance step-based warmup. No-op when warming up by epoch."""
+        if self.warmup_unit != "step":
             return
+        if self.completed < self.warmup_total:
+            self.completed += 1
+            self._set_warmup_lr(self.completed)
+
+    def step(self, metric: Optional[float] = None) -> None:
+        """Advance one epoch: epoch-warmup or main-scheduler step."""
+        if self.warmup_unit == "epoch":
+            if self.completed < self.warmup_total:
+                self.completed += 1
+                self._set_warmup_lr(self.completed)
+                return
+        else:
+            # step-based warmup: hold the main scheduler until warmup is done.
+            if self.in_warmup:
+                return
 
         if self.after_scheduler_requires_metric:
             if metric is None:
@@ -88,7 +128,76 @@ class WarmupScheduler:
         else:
             self.after_scheduler.step()
 
-        self.completed_epochs += 1
+
+class ModelEMA:
+    """
+    Polyak / exponential moving average of model parameters.
+
+    A shadow copy of each trainable parameter is maintained in fp32 on the
+    same device as the live model. After every optimizer step the shadow is
+    updated as ``ema = decay * ema + (1 - decay) * param``. Validation /
+    checkpointing temporarily swap the shadow weights into the live model via
+    the :meth:`applied` context manager so the rest of the training pipeline
+    stays unchanged.
+
+    Buffers (e.g. positional encoding tables) are not averaged — they are
+    deterministic in this codebase. Set ``decay=0`` to disable.
+    """
+
+    def __init__(self, model: nn.Module, decay: float) -> None:
+        self.decay = float(decay)
+        if not (0.0 <= self.decay < 1.0):
+            raise ValueError("ema_decay must be in [0, 1).")
+        self.shadow: Dict[str, torch.Tensor] = {}
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            self.shadow[name] = param.detach().to(dtype=torch.float32).clone()
+
+    @torch.no_grad()
+    def update(self, model: nn.Module) -> None:
+        if self.decay == 0.0:
+            return
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            shadow = self.shadow[name]
+            shadow.mul_(self.decay).add_(param.detach().to(dtype=shadow.dtype), alpha=1.0 - self.decay)
+
+    @torch.no_grad()
+    def state_dict(self, model: nn.Module) -> Dict[str, torch.Tensor]:
+        """Return a state_dict that mirrors ``model.state_dict()`` but uses
+        EMA values for trainable parameters and live values for buffers."""
+        live_state = model.state_dict()
+        merged: Dict[str, torch.Tensor] = {}
+        for key, tensor in live_state.items():
+            if key in self.shadow:
+                merged[key] = self.shadow[key].to(dtype=tensor.dtype, device=tensor.device).clone()
+            else:
+                merged[key] = tensor.detach().clone()
+        return merged
+
+    @contextlib.contextmanager
+    def applied(self, model: nn.Module) -> Iterator[None]:
+        """Temporarily swap EMA weights into ``model``."""
+        if self.decay == 0.0:
+            yield
+            return
+        backup: Dict[str, torch.Tensor] = {}
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                if not param.requires_grad or name not in self.shadow:
+                    continue
+                backup[name] = param.detach().clone()
+                param.copy_(self.shadow[name].to(dtype=param.dtype, device=param.device))
+        try:
+            yield
+        finally:
+            with torch.no_grad():
+                for name, param in model.named_parameters():
+                    if name not in backup:
+                        continue
+                    param.copy_(backup[name])
 
 class DevicePrefetchLoader:
     """
@@ -399,30 +508,40 @@ class ModelTrainer:
         opt_name = str(tp["optimizer"]).lower()
         lr = float(tp["learning_rate"])
         wd = float(tp["weight_decay"])
-        
+        beta1 = float(tp.get("adam_beta1", 0.9))
+        beta2 = float(tp.get("adam_beta2", 0.999))
+
         # Separate parameters for weight decay
         decay, no_decay = [], []
         for n, p in self.model.named_parameters():
             if not p.requires_grad:
                 continue
-            
+
             # Don't apply weight decay to biases and normalization
             if p.dim() == 1 or "bias" in n or "norm" in n:
                 no_decay.append(p)
             else:
                 decay.append(p)
-        
+
         # Parameter groups with different weight decay
         groups = [
             {"params": decay, "weight_decay": wd},
             {"params": no_decay, "weight_decay": 0.0},
         ]
-        
+
         if opt_name != "adamw":
             raise ValueError(f"Unsupported optimizer '{opt_name}'. Only 'adamw' is allowed.")
-        self.optimizer = optim.AdamW(groups, lr=lr, fused=(self.device.type == "cuda"))
-        
-        logger.info(f"Optimizer: {opt_name}  lr={lr:.2e}  wd={wd:.2e}")
+        self.optimizer = optim.AdamW(
+            groups,
+            lr=lr,
+            betas=(beta1, beta2),
+            fused=(self.device.type == "cuda"),
+        )
+
+        logger.info(
+            "Optimizer: %s  lr=%.2e  wd=%.2e  betas=(%.3f, %.3f)",
+            opt_name, lr, wd, beta1, beta2,
+        )
     
     def _build_scheduler(self, tp: Dict) -> None:
         """Create learning rate scheduler."""
@@ -433,6 +552,17 @@ class ModelTrainer:
             raise ValueError("warmup_epochs must be less than total epochs.")
         warmup_start_factor = float(tp["warmup_start_factor"])
         min_lr = float(tp["min_lr"])
+        warmup_unit = str(tp.get("warmup_unit", "epoch")).lower()
+        steps_per_epoch = len(self.train_loader)
+        if steps_per_epoch <= 0:
+            raise RuntimeError("Training loader is empty; cannot build scheduler.")
+
+        warmup_kwargs = {
+            "warmup_epochs": warmup_epochs,
+            "warmup_start_factor": warmup_start_factor,
+            "warmup_unit": warmup_unit,
+            "steps_per_epoch": steps_per_epoch,
+        }
 
         if scheduler_type == "cosine":
             main_scheduler = CosineAnnealingLR(
@@ -442,12 +572,14 @@ class ModelTrainer:
             )
             self.scheduler = WarmupScheduler(
                 self.optimizer,
-                warmup_epochs=warmup_epochs,
-                warmup_start_factor=warmup_start_factor,
                 after_scheduler=main_scheduler,
                 after_scheduler_requires_metric=False,
+                **warmup_kwargs,
             )
-            logger.info("Cosine scheduler with %d warmup epochs.", warmup_epochs)
+            logger.info(
+                "Cosine scheduler with %d warmup epochs (warmup_unit=%s).",
+                warmup_epochs, warmup_unit,
+            )
             return
 
         if scheduler_type == "plateau":
@@ -462,14 +594,15 @@ class ModelTrainer:
             )
             self.scheduler = WarmupScheduler(
                 self.optimizer,
-                warmup_epochs=warmup_epochs,
-                warmup_start_factor=warmup_start_factor,
                 after_scheduler=main_scheduler,
                 after_scheduler_requires_metric=True,
+                **warmup_kwargs,
             )
             logger.info(
-                "Plateau scheduler with %d warmup epochs, patience=%d, factor=%.3f, threshold=%.2e.",
+                "Plateau scheduler with %d warmup epochs (warmup_unit=%s), "
+                "patience=%d, factor=%.3f, threshold=%.2e.",
                 warmup_epochs,
+                warmup_unit,
                 int(tp["plateau_patience"]),
                 float(tp["plateau_factor"]),
                 float(tp["plateau_threshold"]),
@@ -482,10 +615,18 @@ class ModelTrainer:
         """Setup training parameters and loss function."""
         # Loss function (MSE with no reduction for masking)
         self.criterion = nn.MSELoss(reduction="none")
-        
+
         # Gradient clipping
         self.max_grad_norm = float(tp["gradient_clip_val"])
         self.early_stopping_min_delta = float(tp["min_delta"])
+
+        # Optional EMA of model weights. ``ema_decay <= 0`` disables it.
+        ema_decay = float(tp.get("ema_decay", 0.0))
+        if ema_decay > 0.0:
+            self.ema = ModelEMA(self.model, ema_decay)
+            logger.info("EMA enabled with decay=%.4f.", ema_decay)
+        else:
+            self.ema = None
         
         # Mixed precision training
         requested_amp = self.precision["use_amp"]
@@ -561,9 +702,13 @@ class ModelTrainer:
             
             # Training epoch
             train_loss = self._run_epoch(self.train_loader, is_train=True)
-            
-            # Validation epoch
-            val_loss = self._run_epoch(self.val_loader, is_train=False)
+
+            # Validation epoch — evaluate the EMA copy when enabled so the
+            # selected checkpoint is consistent with the saved weights.
+            ema = getattr(self, "ema", None)
+            ema_ctx = ema.applied(self.model) if ema is not None else contextlib.nullcontext()
+            with ema_ctx:
+                val_loss = self._run_epoch(self.val_loader, is_train=False)
 
             previous_best_val = self.best_val_loss
             improvement: Optional[float] = None
@@ -783,6 +928,12 @@ class ModelTrainer:
                     else:
                         self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
+                    # Per-step warmup advance (no-op for warmup_unit="epoch")
+                    self.scheduler.step_batch()
+                    # Polyak averaging happens on the post-step weights so the
+                    # shadow tracks the optimizer trajectory.
+                    if self.ema is not None:
+                        self.ema.update(self.model)
 
                 total_masked_loss += masked_loss_sum.detach().to(dtype=torch.float32)
                 total_elements += num_valid_elements.detach()
@@ -833,9 +984,16 @@ class ModelTrainer:
     
     def _save_best_model(self) -> None:
         """Save the best model checkpoint."""
-        # Prepare checkpoint
+        # When EMA is on, persist the EMA-averaged weights (which is what the
+        # validation loss was just measured against). Otherwise save the live
+        # weights directly.
+        if self.ema is not None:
+            state_dict = self.ema.state_dict(self.model)
+        else:
+            state_dict = self.model.state_dict()
+
         checkpoint = {
-            "state_dict": self.model.state_dict(),
+            "state_dict": state_dict,
             "epoch": self.best_epoch,
             "val_loss": self.best_val_loss,
             "config": self.cfg,
@@ -844,7 +1002,8 @@ class ModelTrainer:
                 "follows_pytorch_standard": True,
                 "loss_excludes_padding": True,
                 "model_output_not_masked": True,
-            }
+            },
+            "ema_decay": self.ema.decay if self.ema is not None else 0.0,
         }
         
         # Save checkpoint

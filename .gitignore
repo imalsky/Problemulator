@@ -13,9 +13,7 @@ dist/
 build/
 
 # Data and model artifacts (large binaries — not tracked in version control)
-data/raw/
-data/processed/
-data/old_data/
+data/
 models/
 
 # Generated figures and binary data files

@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Benchmark dataset construction and DataLoader collation throughput."""
+"""
+benchmark_dataset_collate.py - Standalone throughput benchmark for dataset
+construction and DataLoader collation.
+
+Profiles how long it takes to build an AtmosphericDataset from processed shards
+and iterate batches through the pad_collate function. Useful for tuning
+num_workers, shard cache size, and mmap settings without launching a full
+training run.
+
+Usage:
+    python src/benchmark_dataset_collate.py
+    python src/benchmark_dataset_collate.py --split val --num-batches 100
+    python src/benchmark_dataset_collate.py --batch-size 512 --num-workers 4
+
+This script is not part of the training contract and produces no artifacts.
+"""
 
 from __future__ import annotations
 

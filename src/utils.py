@@ -1,6 +1,33 @@
 #!/usr/bin/env python3
 """
-utils.py - Helper functions for configuration, logging, and data handling.
+utils.py - Configuration loading, validation, logging, and I/O helpers.
+
+Module-level constants define the allowed value sets for every config enum so
+that validation is a simple set-membership check rather than scattered string
+comparisons:
+
+  ALLOWED_NORMALIZATION_METHODS  — normalization methods accepted by preprocess.py
+  REQUIRED_CONFIG_SECTIONS       — top-level keys that every config file must have
+  SUPPORTED_DEVICE_BACKENDS      — allowed miscellaneous_settings.device_backend values
+  SUPPORTED_SCHEDULERS           — allowed training_hyperparameters.scheduler_type values
+  SUPPORTED_MODEL_TYPES          — allowed model_hyperparameters.model_type values
+  SUPPORTED_COMPILE_MODES        — allowed miscellaneous_settings.compile_mode values
+  SUPPORTED_DATASET_LOADING_MODES — allowed miscellaneous_settings.dataset_loading_mode values
+  TORCH_DTYPE_MAP                — string dtype name → torch.dtype for config parsing
+
+Public functions:
+  load_config        — parse and validate a .jsonc or .json config file
+  validate_config    — structural and range validation for a config dict
+  get_precision_config — resolve and cross-validate all precision settings
+  parse_torch_dtype  — convert a dtype string to torch.dtype
+  setup_logging      — configure root logger with optional file sink
+  seed_everything    — set random seeds across Python, NumPy, and PyTorch
+  load_splits        — load and validate the compact dataset splits file
+  compress_splits    — convert verbose split format to compact file_stems format
+  decompress_splits  — reverse of compress_splits
+  save_json          — write a dict to JSON with NumPy/PyTorch type support
+  get_config_str     — safely extract a string value from a nested config dict
+  ensure_dirs        — create one or more directories if they do not exist
 """
 from __future__ import annotations
 

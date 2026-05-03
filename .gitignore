@@ -1,26 +1,39 @@
-# Generated data and model artifacts
-/data/*
-!/data/.gitkeep
-/models/
+# Sphinx build artifacts
+docs/_build/
 
-# Generated figures and plots
-/figures/
-/plots/
-
-# Python caches
+# Python
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
 
-# Editor and OS noise
-.DS_Store
+# Data and model artifacts (large binaries — not tracked in version control)
+data/raw/
+data/processed/
+data/old_data/
+models/
+
+# Generated figures and binary data files
+*.png
+*.npy
+*.h5
+
+# IDE and OS artifacts
 .idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
 
-# Archived or scratch directories
-/old_code/
-/old/
-/codebase_v*/
-/tuning_results/
-/rt_util/
+# Jupyter
+.ipynb_checkpoints/
 
-# Local-only exploratory analysis utilities
-/testing/
+# Environment
+.env
+*.env

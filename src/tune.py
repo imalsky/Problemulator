@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""tune.py - Optuna hyperparameter search comparing transformer vs LSTM.
+"""tune.py - compact Optuna architecture search for Problemulator.
 
-Drives ``ModelTrainer`` in-process: each trial samples a config delta on top
-of a base config, runs a short training loop on a small data fraction, and
-reports per-epoch validation loss to Optuna for Hyperband pruning. The study
-is SQLite-backed and resumable across SLURM restarts.
+This version is intentionally narrower than the original broad tuner.
+
+Design goals:
+- Faster transformer-vs-LSTM comparison.
+- Balanced model-family sampling: ``--model-family both`` alternates
+  transformer/LSTM trials instead of letting TPE prematurely abandon one branch.
+- Do not tune optimizer-scale knobs such as learning rate, weight decay, or
+  batch size. Those remain whatever the base config says.
+- Tune only the high-impact architecture/dropout/activation knobs.
+- Include exact zero in all dropout choices so Optuna can select no dropout.
 """
+
 from __future__ import annotations
-
-import os
-
-# Prevent MKL/OpenMP library conflicts before importing torch (mirrors main.py).
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
 import copy
@@ -19,10 +21,14 @@ import gc
 import json
 import logging
 import math
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
+
+# Prevent MKL/OpenMP library conflicts before importing torch (mirrors main.py).
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import optuna
 import torch
@@ -36,7 +42,6 @@ from main import (
     _resolve_from_project_root,
     run_normalize,
 )
-from model import create_prediction_model
 from train import ModelTrainer
 from utils import (
     ensure_dirs,
@@ -50,55 +55,81 @@ from utils import (
 
 logger = logging.getLogger(__name__)
 
-# --- Tuner mechanics. None of these affect physics; they tune the search loop. ---
-HYPERBAND_REDUCTION_FACTOR = 3          # Optuna's recommended Hyperband bracket factor.
-PRUNE_MIN_RESOURCE_EPOCHS = 4           # Earliest epoch eligible for pruning.
-TPE_N_STARTUP_TRIALS = 16               # Random exploration before TPE conditioning kicks in.
-TPE_N_EI_CANDIDATES = 24                # TPE candidate set size per ask.
-LEADERBOARD_TOP_K = 25                  # Trial checkpoints retained on disk.
-GC_CALLBACK_EVERY_N_TRIALS = 25         # Periodicity of checkpoint cleanup.
+# -----------------------------------------------------------------------------
+# Search-loop constants.
+# -----------------------------------------------------------------------------
+
+# Median pruning is simpler than Hyperband for this compact comparison. It avoids
+# the earlier failure mode where many transformer trials were killed too early.
+PRUNE_WARMUP_EPOCHS = 10
+
+TPE_N_STARTUP_TRIALS = 12
+TPE_N_EI_CANDIDATES = 32
+
+LEADERBOARD_TOP_K = 5
+GC_CALLBACK_EVERY_N_TRIALS = 5
+
 DATA_FRACTION_DEFAULT = 0.1
-EPOCHS_DEFAULT = 35
+EPOCHS_DEFAULT = 25
 EARLY_STOPPING_PATIENCE_DEFAULT = 8
-WARMUP_EPOCHS_DEFAULT = 3               # Must stay strictly < epochs (validate_config requires it).
+WARMUP_EPOCHS_DEFAULT = 2
 SAMPLER_SEED_DEFAULT = 42
-N_TRIALS_DEFAULT = 2000                 # Effective cap; timeout is the real budget.
-TIMEOUT_DEFAULT_SECONDS = 248_400       # ~69h; leaves ~3h margin under a 72h walltime.
+N_TRIALS_DEFAULT = 200
+TIMEOUT_DEFAULT_SECONDS = 248_400  # ~69 h; timeout still acts as the real cap.
 
-# Discrete d_model set chosen so divisors of {1,2,4,8,16} cover most heads cleanly.
-DISCRETE_D_MODEL: Tuple[int, ...] = (64, 96, 128, 160, 192, 224, 256, 384, 512)
-NHEAD_CHOICES: Tuple[int, ...] = (1, 2, 4, 8, 16)
-HEAD_DIVISOR_CHOICES: Tuple[int, ...] = (1, 2, 4)
-DIM_FF_CHOICES: Tuple[int, ...] = (256, 512, 768, 1024, 1536, 2048)
-BATCH_SIZE_CHOICES: Tuple[int, ...] = (64, 128, 256, 512)
-ADAM_BETA2_CHOICES: Tuple[float, ...] = (0.95, 0.99, 0.999)
-EMA_DECAY_CHOICES: Tuple[float, ...] = (0.0, 0.99, 0.999)
+# -----------------------------------------------------------------------------
+# Compact search space.
+# -----------------------------------------------------------------------------
 
-# Param-matched comparisons: when a trial picks `param_match_mode="matched"`,
-# the architecture-sizing knob (dim_feedforward for transformer, d_model for
-# LSTM) is derived to land near one of these budgets so transformer/LSTM trials
-# can be paired apples-to-apples post hoc. Targets span ~2 orders of magnitude
-# around the typical baseline runs.
-PARAM_MATCH_TARGETS: Tuple[int, ...] = (250_000, 1_000_000, 4_000_000, 15_000_000)
-# Search bounds for the matched-mode solvers. Both knobs are free positive ints
-# per validate_config; these bounds just keep the bisection loop bounded.
-TRANSFORMER_DIM_FF_SOLVE_BOUNDS: Tuple[int, int] = (16, 32_768)
-LSTM_D_MODEL_SOLVE_BOUNDS: Tuple[int, int] = (16, 2048)
-LSTM_D_MODEL_SOLVE_STEP: int = 8  # Snap solved d_model to a multiple of 8.
+# Shared architecture choices.
+# d_model=128 was consistently uncompetitive; removed.
+D_MODEL_CHOICES: Tuple[int, ...] = (256, 512)
+# Dropout=0 was the strongest value in the prior search, but the reviewer
+# specifically questions whether zero-dropout is robust. Three light values
+# are kept so the new search can confirm or refute that empirically.
+DROPOUT_CHOICES: Tuple[float, ...] = (0.0, 0.025, 0.05)
+OUTPUT_HEAD_DIVISOR_CHOICES: Tuple[int, ...] = (1, 2, 4)
+# output_head_dropout_factor=0.5 was never competitive; removed.
+OUTPUT_HEAD_DROPOUT_FACTOR_CHOICES: Tuple[float, ...] = (0.0, 0.25)
+# film_clamp=2.0 was consistently the weakest value; removed.
+FILM_CLAMP_CHOICES: Tuple[float, ...] = (5.0, 10.0, 50.0)
+
+# Transformer-only choices.
+# ffn_type: swiglu mean was 33% worse than gelu; fixed to gelu (TRANSFORMER_FFN_TYPE_FIXED).
+# use_qk_norm: False trials had best=2.73e-4 vs True best=2.14e-4; fixed to True.
+TRANSFORMER_FFN_TYPE_FIXED: str = "gelu"
+TRANSFORMER_QK_NORM_FIXED: bool = True
+TRANSFORMER_LAYER_CHOICES: Tuple[int, ...] = (2, 3, 4)
+TRANSFORMER_NHEAD_CHOICES: Tuple[int, ...] = (2, 4, 8)
+TRANSFORMER_FFN_MULT_CHOICES: Tuple[int, ...] = (2, 4, 8)
+# attention_dropout=0.05 had only 1 trial with the worst mean; removed.
+TRANSFORMER_ATTENTION_DROPOUT_CHOICES: Tuple[float, ...] = (0.0, 0.025, 0.1)
+
+# LSTM-only choices.
+# bidirectional=False was 4–5× worse than True; fixed to True.
+# num_layers=1 was consistently weaker; removed.
+LSTM_BIDIRECTIONAL_FIXED: bool = True
+LSTM_LAYER_CHOICES: Tuple[int, ...] = (2, 3)
 
 
-def _divisors(value: int, candidates: Tuple[int, ...]) -> Tuple[int, ...]:
-    """Return the subset of ``candidates`` that evenly divide ``value``."""
-    return tuple(c for c in candidates if value % c == 0)
+def _valid_heads(d_model: int) -> Tuple[int, ...]:
+    """Return legal attention-head counts for ``d_model``."""
+    return tuple(h for h in TRANSFORMER_NHEAD_CHOICES if d_model % h == 0)
 
 
-def _at_most(value: int, candidates: Tuple[int, ...]) -> Tuple[int, ...]:
-    """Return ``candidates`` filtered to entries ``<= value``."""
-    return tuple(c for c in candidates if c <= value)
+def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursive merge: dicts merge, scalars/lists in ``overrides`` replace base."""
+    out = copy.deepcopy(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
 
 
 class TunerCallbackTrainer(ModelTrainer):
-    """ModelTrainer subclass that reports per-epoch val loss to Optuna and prunes."""
+    """ModelTrainer subclass that reports per-epoch val loss to Optuna."""
 
     def __init__(
         self,
@@ -130,289 +161,159 @@ class TunerCallbackTrainer(ModelTrainer):
         lr: float,
     ) -> None:
         super()._log_epoch_results(epoch, train_loss, val_loss, elapsed_time, improvement, lr)
+
         if not math.isfinite(val_loss):
             raise optuna.TrialPruned(f"Non-finite val_loss at epoch {epoch}.")
+
         self._trial.report(val_loss, step=epoch)
         if self._trial.should_prune():
             raise optuna.TrialPruned(f"Pruned at epoch {epoch}, val={val_loss:.3e}.")
 
 
-def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursive merge: dicts merge, scalars/lists in ``overrides`` replace base."""
-    out = copy.deepcopy(base)
-    for key, value in overrides.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = _deep_merge(out[key], value)
-        else:
-            out[key] = copy.deepcopy(value)
-    return out
+def _choose_model_type(trial: optuna.Trial, requested_family: str) -> str:
+    """Select model family without letting TPE abandon one branch.
 
+    ``both`` alternates by trial number:
+    - even trials: transformer
+    - odd trials: LSTM
 
-def _count_model_params(base_config: Dict[str, Any], model_block: Dict[str, Any]) -> int:
-    """Build the model on CPU (no compile) and return its trainable param count.
-
-    Used by the matched-budget solvers; relies on ``create_prediction_model``
-    to keep the count exactly aligned with what training will instantiate.
+    This makes early comparisons balanced and deterministic.
     """
-    cfg = _deep_merge(base_config, {"model_hyperparameters": model_block})
-    cfg["miscellaneous_settings"]["torch_compile"] = False
-    model = create_prediction_model(cfg, device=torch.device("cpu"), compile_model=False)
-    n = sum(p.numel() for p in model.parameters())
-    del model
-    return int(n)
+    family = str(requested_family).lower()
+    if family == "both":
+        return "transformer" if trial.number % 2 == 0 else "lstm"
+    if family in {"transformer", "lstm"}:
+        return family
+    raise ValueError(f"Unknown model family '{requested_family}'.")
 
 
-def _solve_transformer_dim_ff(
-    base_config: Dict[str, Any],
-    partial_block: Dict[str, Any],
-    target_params: int,
-) -> int:
-    """Bisect ``transformer.dim_feedforward`` so the model lands near ``target_params``.
-
-    Param count is monotone-increasing in ``dim_feedforward`` (FFN widths are
-    purely additive). Returns the int from the search interval whose realised
-    param count is closest to the target.
-    """
-    lo, hi = TRANSFORMER_DIM_FF_SOLVE_BOUNDS
-
-    def count_at(dim_ff: int) -> int:
-        block = copy.deepcopy(partial_block)
-        block["transformer"]["dim_feedforward"] = int(dim_ff)
-        return _count_model_params(base_config, block)
-
-    n_lo = count_at(lo)
-    n_hi = count_at(hi)
-    if target_params <= n_lo:
-        return lo
-    if target_params >= n_hi:
-        return hi
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        n_mid = count_at(mid)
-        if n_mid < target_params:
-            lo, n_lo = mid, n_mid
-        else:
-            hi, n_hi = mid, n_mid
-    return lo if abs(n_lo - target_params) <= abs(n_hi - target_params) else hi
-
-
-def _solve_lstm_d_model(
-    base_config: Dict[str, Any],
-    partial_block: Dict[str, Any],
-    target_params: int,
-) -> int:
-    """Bisect LSTM ``d_model`` (snapped to a multiple of LSTM_D_MODEL_SOLVE_STEP).
-
-    Param count is monotone-increasing in ``d_model`` for fixed num_layers /
-    bidirectional / head_divisor. Returns the snapped int whose realised count
-    is closest to the target.
-    """
-    step = LSTM_D_MODEL_SOLVE_STEP
-    lo_raw, hi_raw = LSTM_D_MODEL_SOLVE_BOUNDS
-    lo = max(step, ((lo_raw + step - 1) // step) * step)
-    hi = (hi_raw // step) * step
-
-    def count_at(d: int) -> int:
-        block = copy.deepcopy(partial_block)
-        block["d_model"] = int(d)
-        return _count_model_params(base_config, block)
-
-    n_lo = count_at(lo)
-    n_hi = count_at(hi)
-    if target_params <= n_lo:
-        return lo
-    if target_params >= n_hi:
-        return hi
-    while hi - lo > step:
-        mid = (((lo + hi) // 2) // step) * step
-        if mid <= lo:
-            mid = lo + step
-        if mid >= hi:
-            mid = hi - step
-        n_mid = count_at(mid)
-        if n_mid < target_params:
-            lo, n_lo = mid, n_mid
-        else:
-            hi, n_hi = mid, n_mid
-    return lo if abs(n_lo - target_params) <= abs(n_hi - target_params) else hi
-
-
-def _suggest_search_space(
-    trial: optuna.Trial, base_config: Dict[str, Any]
-) -> Dict[str, Any]:
-    """Sample a per-trial config delta. Branches conditionally on model_type.
-
-    When ``param_match_mode="matched"`` is sampled, the architecture-sizing
-    knob is derived from a discrete target budget (PARAM_MATCH_TARGETS) so
-    transformer and LSTM trials can be paired apples-to-apples on parameter
-    count. ``free`` mode preserves the original sampling space unchanged.
-    """
-    model_type = trial.suggest_categorical("model_type", ["transformer", "lstm"])
-    param_match_mode = trial.suggest_categorical(
-        "param_match_mode", ["free", "matched"]
+def _suggest_common_model_block(trial: optuna.Trial) -> Dict[str, Any]:
+    """Sample shared architecture settings."""
+    d_model = int(trial.suggest_categorical("d_model", list(D_MODEL_CHOICES)))
+    dropout = float(trial.suggest_categorical("dropout", list(DROPOUT_CHOICES)))
+    output_head_divisor = int(
+        trial.suggest_categorical("output_head_divisor", list(OUTPUT_HEAD_DIVISOR_CHOICES))
     )
+    output_head_dropout_factor = float(
+        trial.suggest_categorical(
+            "output_head_dropout_factor", list(OUTPUT_HEAD_DROPOUT_FACTOR_CHOICES)
+        )
+    )
+    film_clamp = float(trial.suggest_categorical("film_clamp", list(FILM_CLAMP_CHOICES)))
 
-    target_params: int = 0
-    if param_match_mode == "matched":
-        target_params = int(
-            trial.suggest_categorical(
-                "matched_target_params", list(PARAM_MATCH_TARGETS)
-            )
+    # Guard against invalid output-head widths if d_model is small.
+    if output_head_divisor > d_model:
+        raise optuna.TrialPruned(
+            f"output_head_divisor={output_head_divisor} invalid for d_model={d_model}."
         )
 
-    dropout = trial.suggest_float("dropout", 0.0, 0.3)
-    head_dropout_factor = trial.suggest_float("output_head_dropout_factor", 0.0, 0.7)
-    film_clamp = trial.suggest_float("film_clamp", 1e2, 1e4, log=True)
-
-    learning_rate = trial.suggest_float("learning_rate", 1e-5, 5e-3, log=True)
-    weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-1, log=True)
-    batch_size = trial.suggest_categorical("batch_size", list(BATCH_SIZE_CHOICES))
-    gradient_clip_val = trial.suggest_float("gradient_clip_val", 0.5, 5.0)
-    scheduler_type = trial.suggest_categorical("scheduler_type", ["cosine", "plateau"])
-    warmup_start_factor = trial.suggest_float("warmup_start_factor", 0.01, 0.5)
-    warmup_unit = trial.suggest_categorical("warmup_unit", ["epoch", "step"])
-    adam_beta2 = trial.suggest_categorical("adam_beta2", list(ADAM_BETA2_CHOICES))
-    ema_decay = trial.suggest_categorical("ema_decay", list(EMA_DECAY_CHOICES))
-
-    if model_type == "transformer":
-        d_model = trial.suggest_categorical("d_model", list(DISCRETE_D_MODEL))
-        # In matched mode, fix the head_divisor to 1 so the only varying
-        # transformer-sizing knob is dim_feedforward (cleaner pairing signal).
-        if param_match_mode == "matched":
-            head_divisor = 1
-        else:
-            head_divisor = trial.suggest_categorical(
-                "output_head_divisor", list(_at_most(d_model, HEAD_DIVISOR_CHOICES))
-            )
-
-        valid_heads = _divisors(d_model, NHEAD_CHOICES)
-        if not valid_heads:
-            raise optuna.TrialPruned(f"No valid nhead for d_model={d_model}.")
-        nhead = trial.suggest_categorical("nhead", list(valid_heads))
-        num_layers = trial.suggest_int("num_layers_transformer", 2, 8)
-        attention_dropout = trial.suggest_float("attention_dropout", 0.0, 0.3)
-        use_qk_norm = trial.suggest_categorical("use_qk_norm", [True, False])
-        qkv_bias = trial.suggest_categorical("qkv_bias", [True, False])
-        ffn_type = trial.suggest_categorical("ffn_type", ["gelu", "swiglu"])
-
-        partial_transformer_block: Dict[str, Any] = {
-            "model_type": "transformer",
-            "d_model": int(d_model),
-            "dropout": float(dropout),
-            "output_head_divisor": int(head_divisor),
-            "output_head_dropout_factor": float(head_dropout_factor),
-            "film_clamp": float(film_clamp),
-            "transformer": {
-                "nhead": int(nhead),
-                "num_layers": int(num_layers),
-                "dim_feedforward": 256,  # placeholder, set below
-                "attention_dropout": float(attention_dropout),
-                "use_qk_norm": bool(use_qk_norm),
-                "qkv_bias": bool(qkv_bias),
-                "ffn_type": str(ffn_type),
-            },
-        }
-
-        if param_match_mode == "free":
-            dim_feedforward = trial.suggest_categorical(
-                "dim_feedforward", list(DIM_FF_CHOICES)
-            )
-        else:
-            dim_feedforward = _solve_transformer_dim_ff(
-                base_config, partial_transformer_block, target_params
-            )
-
-        partial_transformer_block["transformer"]["dim_feedforward"] = int(dim_feedforward)
-        model_block = partial_transformer_block
-        use_amp = True
-        amp_autocast_dtype = "bfloat16"
-
-    else:  # LSTM
-        num_layers = trial.suggest_int("num_layers_lstm", 1, 5)
-        bidirectional = trial.suggest_categorical("bidirectional", [True, False])
-
-        if param_match_mode == "free":
-            d_model = trial.suggest_categorical("d_model", list(DISCRETE_D_MODEL))
-            head_divisor = trial.suggest_categorical(
-                "output_head_divisor", list(_at_most(d_model, HEAD_DIVISOR_CHOICES))
-            )
-        else:
-            # Same head_divisor=1 convention as the matched transformer path
-            # so output heads are identical across paired trials.
-            head_divisor = 1
-
-        partial_lstm_block: Dict[str, Any] = {
-            "model_type": "lstm",
-            "d_model": int(d_model) if param_match_mode == "free" else 64,
-            "dropout": float(dropout),
-            "output_head_divisor": int(head_divisor),
-            "output_head_dropout_factor": float(head_dropout_factor),
-            "film_clamp": float(film_clamp),
-            "lstm": {
-                "num_layers": int(num_layers),
-                "bidirectional": bool(bidirectional),
-            },
-        }
-
-        if param_match_mode == "matched":
-            d_model = _solve_lstm_d_model(
-                base_config, partial_lstm_block, target_params
-            )
-            partial_lstm_block["d_model"] = int(d_model)
-
-        model_block = partial_lstm_block
-        # use_amp=False requires amp_autocast_dtype="none" (validate_config invariant).
-        use_amp = False
-        amp_autocast_dtype = "none"
-
-    if param_match_mode == "matched":
-        actual_n = _count_model_params(base_config, model_block)
-        trial.set_user_attr("matched_target_params", int(target_params))
-        trial.set_user_attr("actual_param_count", int(actual_n))
-    trial.set_user_attr("param_match_mode", str(param_match_mode))
-
     return {
-        "model_hyperparameters": model_block,
-        "training_hyperparameters": {
-            "learning_rate": float(learning_rate),
-            "weight_decay": float(weight_decay),
-            "batch_size": int(batch_size),
-            "gradient_clip_val": float(gradient_clip_val),
-            "scheduler_type": str(scheduler_type),
-            "warmup_start_factor": float(warmup_start_factor),
-            "warmup_unit": str(warmup_unit),
-            "adam_beta1": 0.9,
-            "adam_beta2": float(adam_beta2),
-            "ema_decay": float(ema_decay),
-            "use_amp": bool(use_amp),
-        },
-        "precision": {
-            "amp_autocast_dtype": amp_autocast_dtype,
-        },
+        "d_model": d_model,
+        "dropout": dropout,
+        "output_head_divisor": output_head_divisor,
+        "output_head_dropout_factor": output_head_dropout_factor,
+        "film_clamp": film_clamp,
     }
 
 
+def _suggest_search_space(
+    trial: optuna.Trial,
+    base_config: Dict[str, Any],
+    requested_family: str,
+) -> Dict[str, Any]:
+    """Sample a compact per-trial config delta.
+
+    This intentionally does NOT sample:
+    - learning_rate
+    - weight_decay
+    - batch_size
+    - Adam betas
+    - EMA decay
+    - scheduler type
+
+    Those stay fixed from the base config, which makes the architecture
+    comparison much faster and easier to interpret.
+    """
+    del base_config  # Kept in signature for future extension and objective symmetry.
+
+    model_type = _choose_model_type(trial, requested_family)
+    trial.set_user_attr("model_type", model_type)
+
+    common = _suggest_common_model_block(trial)
+
+    if model_type == "transformer":
+        d_model = int(common["d_model"])
+        valid_heads = _valid_heads(d_model)
+        if not valid_heads:
+            raise optuna.TrialPruned(f"No valid nhead for d_model={d_model}.")
+
+        nhead = int(trial.suggest_categorical("nhead", list(valid_heads)))
+        num_layers = int(
+            trial.suggest_categorical("num_layers_transformer", list(TRANSFORMER_LAYER_CHOICES))
+        )
+        ffn_mult = int(
+            trial.suggest_categorical("ffn_mult", list(TRANSFORMER_FFN_MULT_CHOICES))
+        )
+        attention_dropout = float(
+            trial.suggest_categorical(
+                "attention_dropout", list(TRANSFORMER_ATTENTION_DROPOUT_CHOICES)
+            )
+        )
+
+        model_block = {
+            "model_type": "transformer",
+            **common,
+            "transformer": {
+                "nhead": nhead,
+                "num_layers": num_layers,
+                "dim_feedforward": int(d_model * ffn_mult),
+                "attention_dropout": attention_dropout,
+                "use_qk_norm": TRANSFORMER_QK_NORM_FIXED,
+                "qkv_bias": True,
+                "ffn_type": TRANSFORMER_FFN_TYPE_FIXED,
+            },
+        }
+
+    else:
+        num_layers = int(
+            trial.suggest_categorical("num_layers_lstm", list(LSTM_LAYER_CHOICES))
+        )
+
+        model_block = {
+            "model_type": "lstm",
+            **common,
+            "lstm": {
+                "num_layers": num_layers,
+                "bidirectional": LSTM_BIDIRECTIONAL_FIXED,
+            },
+        }
+
+    return {"model_hyperparameters": model_block}
+
+
 def _forced_overrides(args: argparse.Namespace, trial_number: int, study_name: str) -> Dict[str, Any]:
-    """Tuner-mandated config keys that are NOT sampled."""
+    """Tuner-mandated config keys that are not sampled.
+
+    Important: optimizer-scale parameters are intentionally not touched here.
+    The base config remains responsible for learning_rate, weight_decay,
+    batch_size, Adam betas, EMA decay, and scheduler choice.
+    """
     return {
         "training_hyperparameters": {
             "epochs": int(args.epochs),
             "dataset_fraction_to_use": float(args.data_fraction),
             "early_stopping_patience": int(args.patience),
-            "warmup_epochs": int(WARMUP_EPOCHS_DEFAULT),
+            "warmup_epochs": int(args.warmup_epochs),
         },
         "miscellaneous_settings": {
             "torch_compile": False,
-            "num_workers": 1,
+            "num_workers": int(args.num_workers),
             "rebuild_processed_data": False,
             "execution_mode": "train",
-            # Fixed seed across trials => identical 10% slice for every trial
-            # (apples-to-apples architecture comparison).
+            # Fixed seed across trials => identical sampled data subset for every trial.
             "random_seed": int(args.sampler_seed),
         },
         "output_paths_config": {
-            # Per-trial unique foldername satisfies validate_config; the actual
-            # save_dir is passed explicitly to ModelTrainer.
             "fixed_model_foldername": f"tune_{study_name}/trial_{trial_number:04d}",
         },
     }
@@ -431,7 +332,7 @@ def _is_oom_error(exc: BaseException) -> bool:
         return True
     if isinstance(exc, RuntimeError):
         msg = str(exc).lower()
-        return "out of memory" in msg or "cuda" in msg and "memory" in msg
+        return "out of memory" in msg or ("cuda" in msg and "memory" in msg)
     return False
 
 
@@ -448,7 +349,7 @@ def _build_objective(
     """Build the Optuna objective bound to invariants resolved once at startup."""
 
     def objective(trial: optuna.Trial) -> float:
-        suggested = _suggest_search_space(trial, base_config)
+        suggested = _suggest_search_space(trial, base_config, args.model_family)
         forced = _forced_overrides(args, trial.number, study_name)
 
         merged = _deep_merge(base_config, suggested)
@@ -462,8 +363,6 @@ def _build_objective(
         if not save_json(merged, save_dir / "trial_config.json"):
             raise RuntimeError(f"Failed to save trial_config.json in {save_dir}")
 
-        # Stash a compact summary on the trial for the leaderboard.
-        trial.set_user_attr("model_type", merged["model_hyperparameters"]["model_type"])
         trial.set_user_attr("save_dir", str(save_dir.resolve()))
         trial.set_user_attr("started_at", time.time())
 
@@ -478,15 +377,24 @@ def _build_objective(
                 collate_fn=collate_fn,
                 trial=trial,
             )
+
+            if trainer.model is not None:
+                n_params = sum(p.numel() for p in trainer.model.parameters())
+                n_trainable = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
+                trial.set_user_attr("num_parameters", int(n_params))
+                trial.set_user_attr("num_trainable", int(n_trainable))
+
             best_val = trainer.train()
             return float(best_val)
+
         except optuna.TrialPruned:
             raise
         except BaseException as exc:
             if _is_oom_error(exc):
                 logger.warning(
                     "Trial %d marked pruned due to GPU memory pressure: %s",
-                    trial.number, exc,
+                    trial.number,
+                    exc,
                 )
                 raise optuna.TrialPruned(f"OOM: {exc}") from exc
             raise
@@ -501,13 +409,16 @@ def _build_objective(
 
 
 def _garbage_collect_callback_factory(
-    models_root: Path, study_name: str, top_k: int
+    models_root: Path,
+    study_name: str,
+    top_k: int,
 ) -> Callable[[optuna.Study, optuna.trial.FrozenTrial], None]:
-    """After every N trials, delete checkpoints for trials outside top-K."""
+    """Periodically delete checkpoints for completed trials outside top-K."""
 
     def _callback(study: optuna.Study, _frozen: optuna.trial.FrozenTrial) -> None:
         completed = [
-            t for t in study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,))
+            t
+            for t in study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,))
             if t.value is not None and math.isfinite(t.value)
         ]
         if len(completed) % GC_CALLBACK_EVERY_N_TRIALS != 0 or not completed:
@@ -527,6 +438,7 @@ def _garbage_collect_callback_factory(
                 continue
             if trial_idx in keep_numbers:
                 continue
+
             ckpt = trial_dir / "best_model.pt"
             if ckpt.is_file():
                 try:
@@ -534,30 +446,44 @@ def _garbage_collect_callback_factory(
                     deleted += 1
                 except OSError as exc:
                     logger.warning("Failed to delete %s: %s", ckpt, exc)
+
         if deleted:
             logger.info(
                 "Checkpoint GC: deleted %d non-top-%d checkpoints (kept trials %s).",
-                deleted, top_k, sorted(keep_numbers),
+                deleted,
+                top_k,
+                sorted(keep_numbers),
             )
 
     return _callback
 
 
 def _emit_leaderboard(study: optuna.Study, output_dir: Path) -> None:
-    """Write leaderboard.json (top-K by value asc) and all_trials.json."""
+    """Write leaderboard.json and all_trials.json."""
+
     trials = study.get_trials(
         deepcopy=False,
-        states=(optuna.trial.TrialState.COMPLETE, optuna.trial.TrialState.PRUNED),
+        states=(
+            optuna.trial.TrialState.COMPLETE,
+            optuna.trial.TrialState.PRUNED,
+            optuna.trial.TrialState.RUNNING,
+            optuna.trial.TrialState.FAIL,
+        ),
     )
 
     def _serialize(t: optuna.trial.FrozenTrial) -> Dict[str, Any]:
         duration_s = None
         if t.datetime_start is not None and t.datetime_complete is not None:
             duration_s = (t.datetime_complete - t.datetime_start).total_seconds()
+
+        value = None
+        if t.value is not None and math.isfinite(t.value):
+            value = float(t.value)
+
         return {
             "number": t.number,
             "state": t.state.name,
-            "value": None if t.value is None or not math.isfinite(t.value) else float(t.value),
+            "value": value,
             "params": dict(t.params),
             "user_attrs": dict(t.user_attrs),
             "datetime_start": t.datetime_start.isoformat() if t.datetime_start else None,
@@ -569,18 +495,23 @@ def _emit_leaderboard(study: optuna.Study, output_dir: Path) -> None:
     completed = [s for s in serialized if s["state"] == "COMPLETE" and s["value"] is not None]
     completed.sort(key=lambda s: s["value"])
 
+    best = completed[0] if completed else None
     leaderboard = {
         "study_name": study.study_name,
         "direction": "minimize",
         "n_trials_total": len(trials),
         "n_trials_complete": len(completed),
-        "best_trial_number": completed[0]["number"] if completed else None,
-        "best_value": completed[0]["value"] if completed else None,
-        "best_params": completed[0]["params"] if completed else None,
+        "n_trials_pruned": sum(1 for s in serialized if s["state"] == "PRUNED"),
+        "n_trials_failed": sum(1 for s in serialized if s["state"] == "FAIL"),
+        "best_trial_number": best["number"] if best else None,
+        "best_value": best["value"] if best else None,
+        "best_params": best["params"] if best else None,
+        "best_user_attrs": best["user_attrs"] if best else None,
         "top_k": completed[:LEADERBOARD_TOP_K],
         "note": (
-            "Tuned on a small data fraction with short epochs. To deploy, copy "
-            "best_params into a fresh .jsonc config and run train.sh on full data."
+            "Compact architecture/dropout/activation tuner. Optimizer-scale "
+            "settings such as learning_rate, weight_decay, and batch_size are "
+            "fixed from the base config."
         ),
     }
 
@@ -588,6 +519,7 @@ def _emit_leaderboard(study: optuna.Study, output_dir: Path) -> None:
         raise RuntimeError("Failed to write leaderboard.json")
     if not save_json({"trials": serialized}, output_dir / "all_trials.json"):
         raise RuntimeError("Failed to write all_trials.json")
+
     logger.info("Wrote leaderboard with %d completed trials.", len(completed))
 
 
@@ -600,11 +532,24 @@ def _build_study(args: argparse.Namespace) -> optuna.Study:
         constant_liar=True,
         seed=int(args.sampler_seed),
     )
-    pruner = optuna.pruners.HyperbandPruner(
-        min_resource=PRUNE_MIN_RESOURCE_EPOCHS,
-        max_resource=int(args.epochs),
-        reduction_factor=HYPERBAND_REDUCTION_FACTOR,
-    )
+
+    # When comparing both architectures, MedianPruner is unfair: transformer
+    # trials converge faster and dominate the shared median, causing LSTM trials
+    # to be pruned before they reach their asymptotic loss. Use NopPruner so
+    # every trial runs to early-stopping completion on equal footing.
+    if args.model_family == "both":
+        pruner: optuna.pruners.BasePruner = optuna.pruners.NopPruner()
+        logger.info(
+            "model_family='both': using NopPruner so both architectures run "
+            "to early-stopping completion without cross-architecture bias."
+        )
+    else:
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=TPE_N_STARTUP_TRIALS,
+            n_warmup_steps=int(args.prune_warmup_epochs),
+            interval_steps=1,
+        )
+
     return optuna.create_study(
         study_name=args.study_name,
         storage=args.storage,
@@ -617,20 +562,21 @@ def _build_study(args: argparse.Namespace) -> optuna.Study:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Optuna hyperparameter search for the Problemulator emulator.",
+        description="Compact Optuna architecture search for the Problemulator emulator.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+
     parser.add_argument(
         "--base-config",
         type=Path,
         default=PROJECT_ROOT / "config" / "transformer_v2.jsonc",
-        help="Base config file (full schema). Trial overrides merge on top.",
+        help="Base config file. Optimizer-scale settings are kept from this file.",
     )
     parser.add_argument(
         "--data-dir",
         type=Path,
         default=PROJECT_ROOT / "data",
-        help="Root data dir (contains raw/ and processed/).",
+        help="Root data dir containing raw/ and processed/.",
     )
     parser.add_argument(
         "--models-dir",
@@ -650,13 +596,31 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optuna storage URL. Defaults to sqlite:///<models>/tune_<study>/study.db.",
     )
+    parser.add_argument(
+        "--model-family",
+        type=str,
+        choices=("both", "transformer", "lstm"),
+        default="both",
+        help=(
+            "'both' alternates transformer/LSTM trials. Use 'transformer' for a "
+            "transformer-only search."
+        ),
+    )
     parser.add_argument("--n-trials", type=int, default=N_TRIALS_DEFAULT)
-    parser.add_argument("--timeout", type=int, default=TIMEOUT_DEFAULT_SECONDS,
-                        help="Walltime budget in seconds.")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=TIMEOUT_DEFAULT_SECONDS,
+        help="Walltime budget in seconds.",
+    )
     parser.add_argument("--epochs", type=int, default=EPOCHS_DEFAULT)
     parser.add_argument("--data-fraction", type=float, default=DATA_FRACTION_DEFAULT)
     parser.add_argument("--patience", type=int, default=EARLY_STOPPING_PATIENCE_DEFAULT)
+    parser.add_argument("--warmup-epochs", type=int, default=WARMUP_EPOCHS_DEFAULT)
+    parser.add_argument("--prune-warmup-epochs", type=int, default=PRUNE_WARMUP_EPOCHS)
     parser.add_argument("--sampler-seed", type=int, default=SAMPLER_SEED_DEFAULT)
+    parser.add_argument("--num-workers", type=int, default=1)
+
     return parser.parse_args()
 
 
@@ -680,22 +644,19 @@ def main() -> int:
         if args.storage is None:
             args.storage = f"sqlite:///{(study_dir / 'study.db').resolve()}"
 
-        # Per-study log file alongside study.db so resumes accumulate context.
         setup_logging(log_file=study_dir / "tune_run.log", force=True)
         logger.info("Tune CLI args: %s", json.dumps(vars(args), default=str))
 
-        # Validation ranges: epochs must be > warmup_epochs; pruner needs epochs > min_resource.
-        if args.epochs <= WARMUP_EPOCHS_DEFAULT:
-            raise ValueError(
-                f"--epochs ({args.epochs}) must be > WARMUP_EPOCHS_DEFAULT ({WARMUP_EPOCHS_DEFAULT})."
-            )
-        if args.epochs <= PRUNE_MIN_RESOURCE_EPOCHS:
-            raise ValueError(
-                f"--epochs ({args.epochs}) must be > PRUNE_MIN_RESOURCE_EPOCHS "
-                f"({PRUNE_MIN_RESOURCE_EPOCHS}); the pruner needs room to compare."
-            )
+        if args.epochs <= 0:
+            raise ValueError("--epochs must be positive.")
+        if args.warmup_epochs >= args.epochs:
+            raise ValueError("--warmup-epochs must be less than --epochs.")
+        if args.prune_warmup_epochs >= args.epochs:
+            raise ValueError("--prune-warmup-epochs must be less than --epochs.")
         if not (0.0 < args.data_fraction <= 1.0):
             raise ValueError("--data-fraction must be in (0, 1].")
+        if args.n_trials <= 0:
+            raise ValueError("--n-trials must be positive.")
 
         base_config = load_config(args.base_config)
 
@@ -713,8 +674,7 @@ def main() -> int:
         processed_dir = args.data_dir / "processed"
         raw_hdf5_paths = _get_raw_hdf5_paths(base_config, raw_dir)
 
-        # Build/validate processed artifacts ONCE, shared across all trials.
-        # Force the base config into a known-safe shape for normalize:
+        # Build/validate processed artifacts once, shared across all trials.
         normalize_config = copy.deepcopy(base_config)
         normalize_config["miscellaneous_settings"]["execution_mode"] = "normalize"
         normalize_config["miscellaneous_settings"]["rebuild_processed_data"] = False
@@ -727,12 +687,15 @@ def main() -> int:
 
         study = _build_study(args)
         existing_complete = sum(
-            1 for t in study.get_trials(deepcopy=False)
+            1
+            for t in study.get_trials(deepcopy=False)
             if t.state == optuna.trial.TrialState.COMPLETE
         )
         logger.info(
             "Optuna study '%s' loaded (existing completed trials=%d). Storage: %s",
-            args.study_name, existing_complete, args.storage,
+            args.study_name,
+            existing_complete,
+            args.storage,
         )
 
         objective = _build_objective(
@@ -746,27 +709,37 @@ def main() -> int:
             args=args,
         )
         gc_callback = _garbage_collect_callback_factory(
-            args.models_dir, args.study_name, LEADERBOARD_TOP_K
+            args.models_dir,
+            args.study_name,
+            LEADERBOARD_TOP_K,
         )
 
         study.optimize(
             objective,
-            n_trials=args.n_trials,
-            timeout=args.timeout,
+            n_trials=int(args.n_trials),
+            timeout=int(args.timeout),
             gc_after_trial=True,
             callbacks=[gc_callback],
-            catch=(),
         )
 
         _emit_leaderboard(study, study_dir)
-        logger.info("Tuning complete. Study dir: %s", study_dir.resolve())
+
+        if study.best_trial is not None:
+            logger.info(
+                "Best trial: number=%d value=%.6e params=%s user_attrs=%s",
+                study.best_trial.number,
+                float(study.best_trial.value),
+                json.dumps(study.best_trial.params, sort_keys=True),
+                json.dumps(study.best_trial.user_attrs, sort_keys=True, default=str),
+            )
+
         return 0
 
     except KeyboardInterrupt:
-        logger.warning("Interrupted by user (Ctrl+C).")
+        logger.warning("Interrupted by user.")
         return 130
-    except Exception as exc:  # noqa: BLE001
-        logger.critical("Unhandled exception: %s", exc, exc_info=True)
+    except Exception:
+        logger.exception("Tuning failed.")
         return 1
 
 

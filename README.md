@@ -11,7 +11,7 @@ This repository accompanies a manuscript on hot-Jupiter RT emulation. The
 primary goal is predictive accuracy on held-out flux targets; throughput and
 engineering polish are secondary.
 
-**Documentation:** [Full docs](docs/) | [Implementation spec](docs/spec.md)
+**Documentation:** [Implementation spec](docs/spec.md)
 
 ---
 
@@ -23,7 +23,7 @@ engineering polish are secondary.
 | `config/` | JSONC runtime configs for the transformer baseline (`transformer.jsonc`) and LSTM baseline (`lstm.jsonc`). |
 | `unit_tests/` | Automated tests covering config validation, dataset/model behavior, and training-loop semantics. |
 | `testing/` | Post-training utilities: `export.py` (standalone `.pt2`), `errors.py` (test-set evaluation), `plot_example.py`, `training_progression.py`. |
-| [`docs/`](docs/) | All project documentation — [`spec.md`](docs/spec.md) (authoritative implementation spec) plus Sphinx RST source files. |
+| [`docs/`](docs/) | [`spec.md`](docs/spec.md) — authoritative implementation specification. |
 | `data/` | Runtime data directory (gitignored): raw HDF5 inputs, processed NPY shards, and the dataset split file. |
 | `models/` | Runtime models directory (gitignored): checkpoints, training logs, and `test_metrics.json`. |
 
@@ -107,18 +107,8 @@ REBUILD_PROCESSED=1 sbatch supercomputer_cmds/train.sh
 
 ## Documentation
 
-Full documentation — data contract, configuration reference, workflow details,
-and the scientific baseline — lives in [`docs/`](docs/).
-
 - [`docs/spec.md`](docs/spec.md) — authoritative implementation specification;
   read this before making any non-trivial change to the source.
-- Build the HTML docs locally:
-  ```bash
-  conda activate nn
-  pip install sphinx sphinx-rtd-theme   # if not already installed
-  sphinx-build docs/ docs/_build/html
-  open docs/_build/html/index.html
-  ```
 
 ---
 

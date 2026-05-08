@@ -42,7 +42,7 @@ from main import (
     _resolve_from_project_root,
     run_normalize,
 )
-from train import ModelTrainer
+from train import ModelTrainer, NonFiniteTensorError
 from utils import (
     ensure_dirs,
     get_precision_config,
@@ -68,6 +68,13 @@ TPE_N_EI_CANDIDATES = 32
 
 LEADERBOARD_TOP_K = 5
 GC_CALLBACK_EVERY_N_TRIALS = 5
+
+MODEL_SIDE_NONFINITE_LABELS = {
+    "model predictions",
+    "unreduced loss",
+    "unreduced fractional loss",
+    "masked loss",
+}
 
 DATA_FRACTION_DEFAULT = 0.1
 EPOCHS_DEFAULT = 25
@@ -199,6 +206,8 @@ def _choose_model_type(trial: optuna.Trial, requested_family: str) -> str:
     This makes early comparisons balanced and deterministic.
     """
     family = str(requested_family).lower()
+    if family == "config":
+        raise ValueError("'config' model family must be resolved before sampling.")
     if family == "both":
         return "transformer" if trial.number % 2 == 0 else "lstm"
     if family in {"transformer", "lstm"}:
@@ -410,6 +419,15 @@ def _build_objective(
 
         except optuna.TrialPruned:
             raise
+        except NonFiniteTensorError as exc:
+            if exc.label not in MODEL_SIDE_NONFINITE_LABELS:
+                raise
+            logger.warning(
+                "Trial %d pruned due to model-side numerical instability: %s",
+                trial.number,
+                exc,
+            )
+            raise optuna.TrialPruned(f"Model-side non-finite values: {exc}") from exc
         except BaseException as exc:
             if _is_oom_error(exc):
                 logger.warning(
@@ -620,11 +638,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-family",
         type=str,
-        choices=("both", "transformer", "lstm"),
-        default="both",
+        choices=("config", "both", "transformer", "lstm"),
+        default="config",
         help=(
-            "'both' alternates transformer/LSTM trials. Use 'transformer' for a "
-            "transformer-only search."
+            "'config' uses model_hyperparameters.model_type from the base config. "
+            "'both' alternates transformer/LSTM trials."
         ),
     )
     parser.add_argument("--n-trials", type=int, default=N_TRIALS_DEFAULT)
@@ -680,6 +698,9 @@ def main() -> int:
             raise ValueError("--n-trials must be positive.")
 
         base_config = load_config(args.base_config)
+        if args.model_family == "config":
+            args.model_family = str(base_config["model_hyperparameters"]["model_type"]).lower()
+            logger.info("Resolved --model-family config to '%s'.", args.model_family)
 
         seed_everything(int(args.sampler_seed))
 

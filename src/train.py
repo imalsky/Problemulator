@@ -34,6 +34,27 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 
+class NonFiniteTensorError(RuntimeError):
+    """Raised when a tensor contains NaN or Inf values during training."""
+
+    def __init__(
+        self,
+        *,
+        label: str,
+        mode: str,
+        batch_idx: int,
+        bad_count: int,
+    ) -> None:
+        self.label = label
+        self.mode = mode
+        self.batch_idx = batch_idx
+        self.bad_count = bad_count
+        super().__init__(
+            f"Non-finite values detected in {label} during {mode} batch {batch_idx} "
+            f"({bad_count} values)."
+        )
+
+
 def _assert_finite_tensor(tensor: torch.Tensor, *, label: str, mode: str, batch_idx: int) -> None:
     """Raise a descriptive error when a training/eval tensor contains NaN or Inf."""
     finite_mask = torch.isfinite(tensor)
@@ -41,9 +62,11 @@ def _assert_finite_tensor(tensor: torch.Tensor, *, label: str, mode: str, batch_
         return
 
     bad_count = int((~finite_mask).sum().item())
-    raise RuntimeError(
-        f"Non-finite values detected in {label} during {mode} batch {batch_idx} "
-        f"({bad_count} values)."
+    raise NonFiniteTensorError(
+        label=label,
+        mode=mode,
+        batch_idx=batch_idx,
+        bad_count=bad_count,
     )
 
 

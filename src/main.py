@@ -99,7 +99,7 @@ def _preprocess_relevant_config(config: Dict[str, Any]) -> Dict[str, Any]:
             # NumPy/CPU-only regardless of where training will run, so the
             # backend choice does not change shard contents. Including it
             # would force an unnecessary rebuild whenever a CPU-only normalize
-            # job (e.g. supercomputer_cmds/normalize.sh) precedes a GPU train.
+            # job (e.g. Problemulator/supercomputer_cmds/normalize.sh) precedes a GPU train.
             "shard_size": misc["shard_size"],
             "hdf5_read_chunk_size": misc["hdf5_read_chunk_size"],
         },

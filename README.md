@@ -86,21 +86,21 @@ python testing/plot_example.py
 
 ### Full end-to-end run on SLURM
 
-The SLURM launchers live in ``supercomputer_cmds/`` at the top level of the
-local checkout alongside the data-generation pipeline. From the repo root:
+The SLURM launchers live in ``Problemulator/supercomputer_cmds/``. From the
+repo root:
 
 ```bash
 # 1. Generate PICASO training shards (job array).
-sbatch supercomputer_cmds/gen.sh
+sbatch Problemulator/supercomputer_cmds/gen.sh
 
 # 2. Merge shards, stage data, and train (run after gen.sh finishes).
-sbatch supercomputer_cmds/train.sh
+sbatch Problemulator/supercomputer_cmds/train.sh
 
 # Train a single config.
-CONFIG_NAMES="transformer_v2" sbatch supercomputer_cmds/train.sh
+CONFIG_NAMES="transformer_v2" sbatch Problemulator/supercomputer_cmds/train.sh
 
 # Force a full preprocessing cache rebuild.
-REBUILD_PROCESSED=1 sbatch supercomputer_cmds/train.sh
+REBUILD_PROCESSED=1 sbatch Problemulator/supercomputer_cmds/train.sh
 ```
 
 ---

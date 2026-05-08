@@ -1,0 +1,116 @@
+{
+  "BEST_EPOCH": 112,
+  "VAL_AT_BEST": 0.0001875389,
+  "TEST_LOSS_T": 0.0001869101106422022,
+  "NUM_PARAMS_T": 21285890,
+  "EPOCHS_RUN": 118,
+  "EARLY_STOP_PATIENCE": 30,
+  "EARLY_STOP_MIN_DELTA": 5e-07,
+  "TRAIN_HRS_T": 19.201,
+  "TRAIN_SECONDS_PER_EPOCH_AVG": 585.8,
+  "SWEEP_DIR": "models/tune_rt_tune_20260505_114151",
+  "SWEEP_TRIALS_TOTAL": 60,
+  "BEST_T_TRIAL": 26,
+  "BEST_T_TRIAL_VAL": 0.00021427807223517448,
+  "NUM_PARAMS_T_TUNE": 21285890,
+  "BEST_L_TRIAL": 19,
+  "BEST_L_TRIAL_VAL": 0.00038188265170902014,
+  "NUM_PARAMS_L_TUNE": 14460418,
+  "RATIO_T_VS_L_VAL": 1.7822,
+  "GPU_DEVICE_TYPE": null,
+  "GPU_MODEL": null,
+  "CPU_MODEL": "arm",
+  "INF_MS_T_GPU_B1": null,
+  "INF_MS_T_GPU_B128": null,
+  "INF_MS_T_CPU_B1": 10.155625001061708,
+  "INF_MS_T_CPU_B128": 511.2302289926447,
+  "PER_CHANNEL_ERRORS": {
+    "net_thermal_flux": {
+      "n_points": 55773900,
+      "mae": 2763928.75,
+      "rmse": 7877040.0,
+      "r2": 0.9998154051676295,
+      "abs_pct": {
+        "mean": 21.92750358581543,
+        "median": 0.9818629622459412,
+        "q05": 0.08164940774440765,
+        "q25": 0.4271344244480133,
+        "q75": 1.9507559537887573,
+        "q95": 15.063222885131836
+      },
+      "signed_pct": {
+        "mean": 16.275127410888672,
+        "median": 0.4714730381965637,
+        "std": 367.6089172363281,
+        "q05": -5.951840877532959,
+        "q25": -0.36736413836479187,
+        "q75": 1.3939340114593506,
+        "q95": 3.8983592987060547
+      },
+      "pct_denom_floor": 1.0
+    },
+    "net_reflected_flux": {
+      "n_points": 55773900,
+      "mae": 177963.1875,
+      "rmse": 548720.0,
+      "r2": 0.9998000942890198,
+      "abs_pct": {
+        "mean": 1.5246936082839966,
+        "median": 0.7573736310005188,
+        "q05": 1.3105050378214855e-08,
+        "q25": 0.08347846567630768,
+        "q75": 1.831047534942627,
+        "q95": 5.493063449859619
+      },
+      "signed_pct": {
+        "mean": -0.5803338289260864,
+        "median": -0.0008825463592074811,
+        "std": 3.239248275756836,
+        "q05": -4.509200572967529,
+        "q25": -1.2706533670425415,
+        "q75": 0.2007199227809906,
+        "q95": 2.4099221229553223
+      },
+      "pct_denom_floor": 1.0
+    }
+  },
+  "DATASET_TRAIN_TOTAL": 3470373,
+  "DATASET_VAL_TOTAL": 743651,
+  "DATASET_TEST_TOTAL": 743652,
+  "DROPOUT_BIN_STATS": {
+    "0": {
+      "n": 17,
+      "median_val_loss": 0.00023425013932865113,
+      "best_val_loss": 0.00021427807223517448
+    },
+    "0.025": {
+      "n": 7,
+      "median_val_loss": 0.0002601332089398056,
+      "best_val_loss": 0.00023591579520143569
+    },
+    "0.05": {
+      "n": 6,
+      "median_val_loss": 0.0002800852380460128,
+      "best_val_loss": 0.00024707807460799813
+    }
+  },
+  "PICASO_VERSION": "4.0.1",
+  "PICASO_TIME_S": null,
+  "TEST_LOSS_L": null,
+  "TRAIN_HRS_L": null,
+  "INF_MS_L_GPU_B1": null,
+  "INF_MS_L_GPU_B128": null,
+  "INF_MS_L_CPU_B1": null,
+  "INF_MS_L_CPU_B128": null,
+  "INF_RATIO_T_VS_L": null,
+  "VAL_AT_200": null,
+  "TAIL_RATIO": null,
+  "INF_RATIO_VS_PICASO": null,
+  "BREAKEVEN_PROFILES": null,
+  "_notes": {
+    "lstm_full_scale_dropped": "Per directive (1): LSTM appears in response only via the matched-conditions sweep (trial 19, 30-epoch). No models/lstm_v2/.",
+    "epoch_200_narrative_dropped": "Per directive (4): R1.3/R1.5 reframed around best_epoch=112 < 200, early-stop at 118.",
+    "MPS_benchmark_skipped": "torch.export.load + module().to('mps') is not supported in torch 2.8 (Tensor device mismatch). Re-export targeting MPS or measure on a CUDA SLURM node to populate GPU-side numbers.",
+    "PICASO_TIME_S_status": "Read per-profile cost from gen_data/run_picaso.py SLURM logs or measure separately. Compute INF_RATIO_VS_PICASO and BREAKEVEN_PROFILES once known."
+  }
+}

@@ -20,7 +20,7 @@ engineering polish are secondary.
 | Directory | Description |
 |-----------|-------------|
 | `src/` | Core pipeline: preprocessing, dataset, model definition, training loop, and the `main.py` entrypoint. |
-| `config/` | JSONC runtime configs for the transformer baseline (`transformer.jsonc`) and LSTM baseline (`lstm.jsonc`). |
+| `config/` | JSONC runtime configs for the transformer sweep baseline (`transformer_v2.jsonc`) and LSTM sweep baseline (`lstm_v2.jsonc`). Final-model runs are synthesized into a transient `_final_run.jsonc` by `src/build_final_config.py`. |
 | `unit_tests/` | Automated tests covering config validation, dataset/model behavior, and training-loop semantics. |
 | `testing/` | Post-training utilities: `export.py` (standalone `.pt2`), `errors.py` (test-set evaluation), `plot_example.py`, `training_progression.py`. |
 | [`docs/`](docs/) | [`spec.md`](docs/spec.md) — authoritative implementation specification. |
@@ -63,10 +63,10 @@ conda activate nn
 python src/main.py
 
 # Train with the LSTM baseline.
-python src/main.py --config config/lstm.jsonc
+python src/main.py --config config/lstm_v2.jsonc
 
 # Preprocess only (set execution_mode = "normalize" in the config first).
-python src/main.py --config config/transformer.jsonc
+python src/main.py --config config/transformer_v2.jsonc
 ```
 
 ### Post-training evaluation

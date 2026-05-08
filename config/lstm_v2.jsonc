@@ -63,8 +63,8 @@
       "pressure_bar": "log-min-max",
       "temperature_k": "standard",
       "orbital_distance_m": "log-standard",
-      "net_thermal_flux": "symlog",
-      "net_reflected_flux": "symlog"
+      "net_thermal_flux": "signed-log",
+      "net_reflected_flux": "signed-log"
     },
     "epsilon": 1e-9,
     "padding_comparison_epsilon": 1e-6,
@@ -85,18 +85,21 @@
     "forward_dtype": "float32",
     "loss_dtype": "float32",
     "optimizer_state_dtype": "float32",
-    "amp_autocast_dtype": "none",
+    "amp_autocast_dtype": "bfloat16",
     "float32_matmul_precision": "high"
   },
   "model_hyperparameters": {
     // Available model types: "transformer", "lstm"
+    // Hyperparameters below match trial 19 of the 60-trial sweep at
+    // models/tune_rt_tune_20260505_114151/ (best-of-30 LSTM trials,
+    // val_loss 3.819e-4, 14,460,418 trainable parameters).
     "model_type": "lstm",
-    "d_model": 208,
-    "dropout": 0.0,
-    "film_clamp": 1000.0,
+    "d_model": 512,
+    "dropout": 0.05,
+    "film_clamp": 10.0,
     "max_sequence_length": 75,
-    "output_head_divisor": 2,
-    "output_head_dropout_factor": 0.5,
+    "output_head_divisor": 1,
+    "output_head_dropout_factor": 0.25,
     "transformer": {
       "nhead": 4,
       "num_layers": 4,
@@ -104,7 +107,7 @@
       "attention_dropout": 0.0
     },
     "lstm": {
-      "num_layers": 4,
+      "num_layers": 3,
       "bidirectional": true
     }
   },
@@ -112,23 +115,50 @@
     "epochs": 300,
     "batch_size": 256,
     "learning_rate": 0.0001,
-    "weight_decay": 1e-05,
+    "weight_decay": 0.05,
     "optimizer": "adamw",
+    // AdamW betas: (0.9, 0.95) is the GPT-3/LLaMA/PaLM convention used in the
+    // sweep; preserved here so the final LSTM run reproduces trial-19 conditions.
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.95,
     "gradient_clip_val": 2.0,
     // Available schedulers: "cosine", "plateau"
     "scheduler_type": "cosine",
     "min_lr": 1e-08,
     "warmup_epochs": 10,
     "warmup_start_factor": 0.1,
+    // Warmup granularity: "epoch" (legacy, one LR step per epoch) or "step"
+    // (per optimizer step — smoother, modern default).
+    "warmup_unit": "step",
     "plateau_patience": 10,
     "plateau_factor": 0.5,
     "plateau_threshold": 1e-05,
     // Available threshold modes: "abs", "rel"
     "plateau_threshold_mode": "abs",
-    "early_stopping_patience": 300,
-    "min_delta": 0.0,
-    "use_amp": false,
+    "early_stopping_patience": 30,
+    "min_delta": 1e-05,
+    "use_amp": true,
+    // Polyak averaging (EMA) of model weights. ``0`` disables; ``0.999`` is
+    // the canonical default for vision/regression checkpoints.
+    "ema_decay": 0.999,
     "dataset_fraction_to_use": 1.0
+  },
+  "loss": {
+    // 50/50 mix of normalized MSE and physical-space squared relative error:
+    //   L = 0.5 * masked_mean(MSE on normalized targets)
+    //     + 0.5 * masked_mean((p - t)^2 / (t^2 + fractional_epsilon))
+    // The fractional term lives in physical units (denormalized) and is
+    // numerically safe across zero-crossing fluxes thanks to the additive
+    // epsilon. Note: the literal 0.5/0.5 weights are nominal; the fractional
+    // term typically dominates gradients because MSE in normalized space is
+    // O(1e-4) while the fractional term is dimensionless and O(1e-2) at 10%
+    // relative error. Both gradients flow regardless.
+    "lambda_mse": 0.5,
+    "lambda_frac": 0.5,
+    // Denominator floor in target-physical units (erg cm^-2 s^-1).
+    // Below |t| ~ sqrt(eps) the term degenerates to MSE-flavored; above it,
+    // pure squared relative error.
+    "fractional_epsilon": 1.0
   },
   "output_paths_config": {
     "fixed_model_foldername": "lstm_v2"

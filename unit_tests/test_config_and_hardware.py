@@ -26,7 +26,7 @@ from model import create_prediction_model
 from utils import get_precision_config, load_config, load_splits, validate_config
 
 
-def _load_checked_in_config(config_name: str = "transformer") -> dict:
+def _load_checked_in_config(config_name: str = "transformer_v2") -> dict:
     """Load one of the checked-in JSONC configs as plain JSON for test mutation."""
     config_path = PROJECT_ROOT / "config" / f"{config_name}.jsonc"
     return load_config(config_path)
@@ -38,7 +38,7 @@ class ConfigAndHardwareTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.base_config = _load_checked_in_config()
-        cls.lstm_config = _load_checked_in_config("lstm")
+        cls.lstm_config = _load_checked_in_config("lstm_v2")
 
     def test_checked_in_config_validates(self) -> None:
         """The repository default config should pass strict validation."""
@@ -71,8 +71,10 @@ class ConfigAndHardwareTests(unittest.TestCase):
 
         # Updated for QK-Norm + SwiGLU FFN defaults: explicit Q/K/V/out
         # projections, per-head Q/K LayerNorms, and a 3-matrix gated FFN.
+        # lstm_v2 uses d_model=512, num_layers=3, bidirectional=True
+        # (matches the previous-sweep best LSTM, trial 19).
         self.assertEqual(transformer_params, 4252802)
-        self.assertEqual(lstm_params, 3158378)
+        self.assertEqual(lstm_params, 14460418)
 
     def test_validate_config_rejects_none_normalization(self) -> None:
         """Required variables may not use the removed 'none' normalization mode."""

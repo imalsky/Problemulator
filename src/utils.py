@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import random
 from pathlib import Path
@@ -71,6 +72,7 @@ REQUIRED_CONFIG_SECTIONS = {
     "precision",
     "model_hyperparameters",
     "training_hyperparameters",
+    "loss",
     "output_paths_config",
 }
 SUPPORTED_DEVICE_BACKENDS = {"cpu", "mps", "cuda"}
@@ -822,6 +824,31 @@ def validate_config(config: Dict[str, Any]) -> None:
     if not (0.0 < dataset_fraction <= 1.0):
         raise ValueError("dataset_fraction_to_use must be in (0, 1].")
 
+    # loss
+    loss_section = require_section("loss")
+    required_loss_keys = {"lambda_mse", "lambda_frac", "fractional_epsilon"}
+    missing_loss_keys = required_loss_keys - set(loss_section.keys())
+    if missing_loss_keys:
+        raise ValueError(
+            f"Missing required loss keys: {sorted(missing_loss_keys)}"
+        )
+    for non_neg_key in ("lambda_mse", "lambda_frac"):
+        value = loss_section[non_neg_key]
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"'loss.{non_neg_key}' must be numeric.")
+        value_f = float(value)
+        if not math.isfinite(value_f):
+            raise ValueError(f"'loss.{non_neg_key}' must be finite.")
+        if value_f < 0.0:
+            raise ValueError(f"'loss.{non_neg_key}' must be >= 0.")
+    eps_value = loss_section["fractional_epsilon"]
+    if not isinstance(eps_value, (int, float)):
+        raise ValueError("'loss.fractional_epsilon' must be numeric.")
+    if not math.isfinite(float(eps_value)):
+        raise ValueError("'loss.fractional_epsilon' must be finite.")
+    if float(eps_value) <= 0.0:
+        raise ValueError("'loss.fractional_epsilon' must be > 0.")
+
     # miscellaneous_settings
     misc = require_section("miscellaneous_settings")
     required_misc_keys = {
@@ -1195,6 +1222,7 @@ __all__ = [
     "TORCH_DTYPE_MAP",
     "LOG_FORMAT",
     "METADATA_FILENAME",
+    "UTF8_ENCODING",
     "parse_torch_dtype",
     "get_precision_config",
     "setup_logging",

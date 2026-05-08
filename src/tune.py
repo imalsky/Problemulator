@@ -74,47 +74,66 @@ EPOCHS_DEFAULT = 25
 EARLY_STOPPING_PATIENCE_DEFAULT = 8
 WARMUP_EPOCHS_DEFAULT = 2
 SAMPLER_SEED_DEFAULT = 42
-N_TRIALS_DEFAULT = 200
+N_TRIALS_DEFAULT = 64
 TIMEOUT_DEFAULT_SECONDS = 248_400  # ~69 h; timeout still acts as the real cap.
+
+# Hard cap on dim_feedforward = d_model * ffn_mult. Pairs that exceed this are
+# pruned with optuna.TrialPruned so TPE doesn't waste sampler budget on them.
+DIM_FEEDFORWARD_MAX = 2048
 
 # -----------------------------------------------------------------------------
 # Compact search space.
 # -----------------------------------------------------------------------------
+#
+# Search space is informed by the prior 60-trial sweep at
+# Problemulator/models/tune_rt_tune_20260505_114151/ and a manuscript reviewer's
+# specific concern that zero-dropout configurations may not be robust. Knobs
+# that varied across the prior top-5 (d_model, ffn_mult, num_layers, dropout,
+# attention_dropout, film_clamp, output_head_divisor, output_head_dropout_factor)
+# are still sampled. Knobs that the prior sweep settled (nhead=4, ffn_type=gelu,
+# use_qk_norm=True, bidirectional=True) are now fixed to save trials. Dropout
+# choices include 0.1 specifically to give the reviewer's concern a fair test
+# under the new hybrid loss.
 
 # Shared architecture choices.
 # d_model=128 was consistently uncompetitive; removed.
 D_MODEL_CHOICES: Tuple[int, ...] = (256, 512)
-# Dropout=0 was the strongest value in the prior search, but the reviewer
-# specifically questions whether zero-dropout is robust. Three light values
-# are kept so the new search can confirm or refute that empirically.
-DROPOUT_CHOICES: Tuple[float, ...] = (0.0, 0.025, 0.05)
-OUTPUT_HEAD_DIVISOR_CHOICES: Tuple[int, ...] = (1, 2, 4)
+# Dropout=0 was the strongest value in the prior MSE-only search; the reviewer
+# questions whether that holds under regularization. Range extended to 0.1 so
+# the new search produces evidence for the response under the new hybrid loss.
+DROPOUT_CHOICES: Tuple[float, ...] = (0.0, 0.025, 0.05, 0.1)
+# output_head_divisor=4 never appeared in the prior top-5; dropped.
+OUTPUT_HEAD_DIVISOR_CHOICES: Tuple[int, ...] = (1, 2)
 # output_head_dropout_factor=0.5 was never competitive; removed.
 OUTPUT_HEAD_DROPOUT_FACTOR_CHOICES: Tuple[float, ...] = (0.0, 0.25)
 # film_clamp=2.0 was consistently the weakest value; removed.
 FILM_CLAMP_CHOICES: Tuple[float, ...] = (5.0, 10.0, 50.0)
 
 # Transformer-only choices.
-# ffn_type: swiglu mean was 33% worse than gelu; fixed to gelu (TRANSFORMER_FFN_TYPE_FIXED).
+# ffn_type: swiglu mean was 33% worse than gelu; fixed to gelu.
 # use_qk_norm: False trials had best=2.73e-4 vs True best=2.14e-4; fixed to True.
+# nhead: every trial in the prior top-5 used nhead=4; fixed to 4 to save trials.
 TRANSFORMER_FFN_TYPE_FIXED: str = "gelu"
 TRANSFORMER_QK_NORM_FIXED: bool = True
-TRANSFORMER_LAYER_CHOICES: Tuple[int, ...] = (2, 3, 4)
-TRANSFORMER_NHEAD_CHOICES: Tuple[int, ...] = (2, 4, 8)
+TRANSFORMER_NHEAD_FIXED: int = 4
+# num_layers=2 was consistently weak in the prior sweep; bumped to {3,4,5} so
+# the new search can probe whether deeper stacks help under the hybrid loss.
+TRANSFORMER_LAYER_CHOICES: Tuple[int, ...] = (3, 4, 5)
+# ffn_mult=8 won under the old loss with d_model=512 -> dim_feedforward=4096.
+# The new dim_feedforward<=2048 cap (DIM_FEEDFORWARD_MAX) makes (512, 8) and
+# (512, 4 with d_model=512 -> 2048 ok; 8 -> 4096 not ok) invalid. Invalid
+# (d_model, ffn_mult) pairs are pruned via optuna.TrialPruned at sample time.
 TRANSFORMER_FFN_MULT_CHOICES: Tuple[int, ...] = (2, 4, 8)
-# attention_dropout=0.05 had only 1 trial with the worst mean; removed.
-TRANSFORMER_ATTENTION_DROPOUT_CHOICES: Tuple[float, ...] = (0.0, 0.025, 0.1)
+# attention_dropout: prior winners at 0.0; keep small nonzero range as
+# reviewer counter-evidence under the new loss. 0.1 was a clear outlier in the
+# prior sweep; replaced with 0.05 to keep the range tight.
+TRANSFORMER_ATTENTION_DROPOUT_CHOICES: Tuple[float, ...] = (0.0, 0.025, 0.05)
 
 # LSTM-only choices.
 # bidirectional=False was 4–5× worse than True; fixed to True.
 # num_layers=1 was consistently weaker; removed.
 LSTM_BIDIRECTIONAL_FIXED: bool = True
 LSTM_LAYER_CHOICES: Tuple[int, ...] = (2, 3)
-
-
-def _valid_heads(d_model: int) -> Tuple[int, ...]:
-    """Return legal attention-head counts for ``d_model``."""
-    return tuple(h for h in TRANSFORMER_NHEAD_CHOICES if d_model % h == 0)
 
 
 def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
@@ -243,17 +262,19 @@ def _suggest_search_space(
 
     if model_type == "transformer":
         d_model = int(common["d_model"])
-        valid_heads = _valid_heads(d_model)
-        if not valid_heads:
-            raise optuna.TrialPruned(f"No valid nhead for d_model={d_model}.")
 
-        nhead = int(trial.suggest_categorical("nhead", list(valid_heads)))
         num_layers = int(
             trial.suggest_categorical("num_layers_transformer", list(TRANSFORMER_LAYER_CHOICES))
         )
         ffn_mult = int(
             trial.suggest_categorical("ffn_mult", list(TRANSFORMER_FFN_MULT_CHOICES))
         )
+        dim_feedforward = d_model * ffn_mult
+        if dim_feedforward > DIM_FEEDFORWARD_MAX:
+            raise optuna.TrialPruned(
+                f"dim_feedforward={dim_feedforward} exceeds cap "
+                f"{DIM_FEEDFORWARD_MAX} (d_model={d_model} * ffn_mult={ffn_mult})."
+            )
         attention_dropout = float(
             trial.suggest_categorical(
                 "attention_dropout", list(TRANSFORMER_ATTENTION_DROPOUT_CHOICES)
@@ -264,9 +285,9 @@ def _suggest_search_space(
             "model_type": "transformer",
             **common,
             "transformer": {
-                "nhead": nhead,
+                "nhead": TRANSFORMER_NHEAD_FIXED,
                 "num_layers": num_layers,
-                "dim_feedforward": int(d_model * ffn_mult),
+                "dim_feedforward": dim_feedforward,
                 "attention_dropout": attention_dropout,
                 "use_qk_norm": TRANSFORMER_QK_NORM_FIXED,
                 "qkv_bias": True,

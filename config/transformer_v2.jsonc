@@ -63,8 +63,8 @@
       "pressure_bar": "log-min-max",
       "temperature_k": "standard",
       "orbital_distance_m": "log-standard",
-      "net_thermal_flux": "symlog",
-      "net_reflected_flux": "symlog"
+      "net_thermal_flux": "signed-log",
+      "net_reflected_flux": "signed-log"
     },
     "epsilon": 1e-9,
     "padding_comparison_epsilon": 1e-6,
@@ -147,6 +147,23 @@
     // the canonical default for vision/regression checkpoints.
     "ema_decay": 0.999,
     "dataset_fraction_to_use": 1.0
+  },
+  "loss": {
+    // 50/50 mix of normalized MSE and physical-space squared relative error:
+    //   L = 0.5 * masked_mean(MSE on normalized targets)
+    //     + 0.5 * masked_mean((p - t)^2 / (t^2 + fractional_epsilon))
+    // The fractional term lives in physical units (denormalized) and is
+    // numerically safe across zero-crossing fluxes thanks to the additive
+    // epsilon. Note: the literal 0.5/0.5 weights are nominal; the fractional
+    // term typically dominates gradients because MSE in normalized space is
+    // O(1e-4) while the fractional term is dimensionless and O(1e-2) at 10%
+    // relative error. Both gradients flow regardless.
+    "lambda_mse": 0.5,
+    "lambda_frac": 0.5,
+    // Denominator floor in target-physical units (erg cm^-2 s^-1).
+    // Below |t| ~ sqrt(eps) the term degenerates to MSE-flavored; above it,
+    // pure squared relative error.
+    "fractional_epsilon": 1.0
   },
   "output_paths_config": {
     "fixed_model_foldername": "transformer_v2"

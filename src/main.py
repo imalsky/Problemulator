@@ -95,7 +95,11 @@ def _preprocess_relevant_config(config: Dict[str, Any]) -> Dict[str, Any]:
             "stats_accumulation_dtype": precision["stats_accumulation_dtype"],
         },
         "miscellaneous_settings": {
-            "device_backend": misc["device_backend"],
+            # device_backend is intentionally excluded: preprocessing is
+            # NumPy/CPU-only regardless of where training will run, so the
+            # backend choice does not change shard contents. Including it
+            # would force an unnecessary rebuild whenever a CPU-only normalize
+            # job (e.g. supercomputer_cmds/normalize.sh) precedes a GPU train.
             "shard_size": misc["shard_size"],
             "hdf5_read_chunk_size": misc["hdf5_read_chunk_size"],
         },

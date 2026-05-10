@@ -30,7 +30,8 @@
 #     (see rebuild_processed_data in the selected config). It is only wiped if
 #     REBUILD_PROCESSED=1 is set explicitly.
 #
-# By default this trains the sweep-baseline transformer (transformer_v2.jsonc).
+# By default this trains the tuned transformer (transformer_main.jsonc), whose
+# architecture comes from the best trial of tune_rt_tune_20260508_160639.
 # Models in CONFIG_NAMES train sequentially in the listed order, sharing the
 # processed data cache.
 #
@@ -79,7 +80,7 @@ SKIP_MERGE="${SKIP_MERGE:-auto}"
 # Space-separated list of config stems under config/<name>.jsonc.
 # Models train sequentially in the listed order; the first one that fails
 # stops the job (set -e). Override with CONFIG_NAMES="lstm_v2 transformer_v2" etc.
-CONFIG_NAMES="${CONFIG_NAMES:-transformer_v2}"
+CONFIG_NAMES="${CONFIG_NAMES:-transformer_main}"
 
 MERGED_PATH="$PROJECT_ROOT/gen_data/output/$MERGED_NAME"
 TRAIN_RAW_DIR="$PROBLEMULATOR_ROOT/data/raw"

@@ -14,9 +14,11 @@
 #SBATCH --mail-user=isaac.n.malsky@jpl.nasa.gov
 
 # Drive the Optuna hyperparameter search defined in src/tune.py.
-# By default, tunes the model family declared by BASE_CONFIG. Set
-# MODEL_FAMILY=both for a fair transformer-vs-LSTM ablation with no
-# cross-architecture pruning. Only the top 5 checkpoints are kept.
+# By default, tunes the model family declared by BASE_CONFIG (currently
+# config/lstm_v2.jsonc → 64 LSTM trials). Set MODEL_FAMILY=both for a fair
+# transformer-vs-LSTM ablation with no cross-architecture pruning, or override
+# BASE_CONFIG to sweep the transformer instead. Only the top 5 checkpoints are
+# kept.
 #
 # Pre-requisite: at least one successful train.sh run, so that
 # data/raw/$TRAIN_RAW_NAME exists. tune.sh will not merge
@@ -34,8 +36,8 @@
 #     STUDY_NAME=rt_tune_2026 sbatch Problemulator/supercomputer_cmds/tune.sh
 #     N_TRIALS=500 TIMEOUT_SECONDS=86400 sbatch Problemulator/supercomputer_cmds/tune.sh
 #     EPOCHS=100 PATIENCE=15 DATA_FRACTION=1.0 sbatch Problemulator/supercomputer_cmds/tune.sh
-#     BASE_CONFIG=config/lstm_v2.jsonc sbatch Problemulator/supercomputer_cmds/tune.sh
-#     MODEL_FAMILY=both sbatch Problemulator/supercomputer_cmds/tune.sh
+#     BASE_CONFIG=config/transformer_v2.jsonc sbatch Problemulator/supercomputer_cmds/tune.sh   # sweep transformers instead
+#     MODEL_FAMILY=both sbatch Problemulator/supercomputer_cmds/tune.sh                          # alternate transformer/LSTM trials
 
 set -euo pipefail
 
@@ -81,7 +83,7 @@ cd "$PROBLEMULATOR_ROOT"
 CONDA_ENV="${CONDA_ENV:-nn}"
 MERGED_NAME="${MERGED_NAME:-picaso_results_5M.h5}"
 TRAIN_RAW_NAME="${TRAIN_RAW_NAME:-$MERGED_NAME}"
-BASE_CONFIG="${BASE_CONFIG:-config/transformer_v2.jsonc}"
+BASE_CONFIG="${BASE_CONFIG:-config/lstm_v2.jsonc}"
 MODEL_FAMILY="${MODEL_FAMILY:-config}"
 STUDY_NAME="${STUDY_NAME:-rt_tune_$(date +%Y%m%d_%H%M%S)}"
 # With MODEL_FAMILY=both, 64 trials = 32 transformer + 32 LSTM.

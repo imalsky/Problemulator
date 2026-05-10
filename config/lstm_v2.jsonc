@@ -144,21 +144,29 @@
     "dataset_fraction_to_use": 1.0
   },
   "loss": {
-    // 50/50 mix of normalized MSE and physical-space squared relative error:
-    //   L = 0.5 * masked_mean(MSE on normalized targets)
-    //     + 0.5 * masked_mean((p - t)^2 / (t^2 + fractional_epsilon))
-    // The fractional term lives in physical units (denormalized) and is
-    // numerically safe across zero-crossing fluxes thanks to the additive
-    // epsilon. Note: the literal 0.5/0.5 weights are nominal; the fractional
-    // term typically dominates gradients because MSE in normalized space is
-    // O(1e-4) while the fractional term is dimensionless and O(1e-2) at 10%
-    // relative error. Both gradients flow regardless.
-    "lambda_mse": 0.5,
-    "lambda_frac": 0.5,
-    // Denominator floor in target-physical units (erg cm^-2 s^-1).
-    // Below |t| ~ sqrt(eps) the term degenerates to MSE-flavored; above it,
-    // pure squared relative error.
-    "fractional_epsilon": 1.0
+    // Loss selector. Allowed:
+    //   "signed_log_adaptive" -> per-channel-weighted signed-log loss + MSE(z):
+    //       L = lambda_z * masked_mean((pred_z - true_z)^2)
+    //         + lambda_phys * sum_c w_c
+    //                       * |signed_log10(p_phys_c) - signed_log10(t_phys_c)|^p_norm
+    //     where signed_log10(x) = sign(x) * log10(|x| + 1) (sign-preserving,
+    //     well-defined at zero, no divisive amplification near flux
+    //     zero-crossings).
+    //   "hybrid_fractional" -> legacy 0.5*MSE(z) + 0.5*(p-t)^2/(t^2+eps).
+    "type": "signed_log_adaptive",
+    "lambda_z": 0.5,
+    "lambda_phys": 0.5,
+    // Per-channel weighting:
+    //   "uniform" -> w_c = 1.
+    //   "range"   -> w_c = std_c^weight_power, normalized so mean(w)=1,
+    //                clamped to [w_min, w_max], then renormalized so the
+    //                phys-term magnitude does not depend on the weight bounds.
+    "weight_mode": "range",
+    "weight_power": 0.5,
+    "w_min": 0.5,
+    "w_max": 2.0,
+    // p_norm: 1 -> MAE in signed-log space (Huber-like); 2 -> MSE.
+    "p_norm": 1
   },
   "output_paths_config": {
     "fixed_model_foldername": "lstm_v2"

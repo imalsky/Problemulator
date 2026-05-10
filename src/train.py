@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader
 
 from dataset import create_dataset
 from hardware import should_pin_memory
+from loss import AdaptiveSignedLogLoss
 from model import create_prediction_model
 from normalizer import DataNormalizer
 from utils import (
@@ -686,79 +687,142 @@ class ModelTrainer:
         )
 
     def _setup_loss_terms(self) -> None:
-        """Wire up mixed-loss weights and per-target denorm metadata.
+        """Configure the active loss based on ``cfg['loss']['type']``.
 
-        Total training loss is::
+        Two implementations coexist:
 
-            L = lambda_mse * masked_mean(MSE_normalized)
-              + lambda_frac * masked_mean((p_phys - t_phys)^2 / (t_phys^2 + eps))
+        ``signed_log_adaptive`` (default):
+            ``L = lambda_z * masked_mean((pred_z - true_z)^2)
+                + lambda_phys * sum_c w_c
+                              * |signed_log10(p_phys_c) - signed_log10(t_phys_c)|^p_norm``
 
-        The fractional term lives in physical units (denormalized). When
-        ``lambda_frac == 0`` the per-target denorm metadata is skipped entirely
-        so the no-op path stays zero-cost and existing MSE-only runs match
-        bit-for-bit.
+            Implemented in :class:`loss.AdaptiveSignedLogLoss`. Stored as
+            ``self.loss_module``; the trainer delegates the per-element loss
+            computation to that module and applies the same padding-mask
+            reduction as the legacy path.
+
+        ``hybrid_fractional`` (legacy):
+            ``L = lambda_mse * masked_mean(MSE_normalized)
+                + lambda_frac * masked_mean((p_phys - t_phys)^2 / (t_phys^2 + eps))``
+
+            Computed inline in :meth:`_run_epoch`. When ``lambda_frac == 0`` the
+            per-target denorm metadata is skipped entirely.
         """
         loss_cfg = self.cfg["loss"]
-        self.lambda_mse = float(loss_cfg["lambda_mse"])
-        self.lambda_frac = float(loss_cfg["lambda_frac"])
-        self.fractional_epsilon = float(loss_cfg["fractional_epsilon"])
+        loss_type = str(loss_cfg["type"]).lower()
+        self.loss_type = loss_type
 
-        if self.lambda_mse == 0.0 and self.lambda_frac == 0.0:
-            raise ValueError(
-                "loss.lambda_mse and loss.lambda_frac are both zero; the "
-                "training loss would be identically zero."
-            )
-
+        # Reset shared fields. Each branch populates the ones it owns.
+        self.loss_module: Optional[nn.Module] = None
+        self.lambda_mse = 0.0
+        self.lambda_frac = 0.0
+        self.fractional_epsilon = 0.0
         self._target_methods: List[str] = []
         self._target_stats: List[Dict[str, Any]] = []
 
-        if self.lambda_frac > 0.0:
-            target_vars: List[str] = list(
-                self.cfg["data_specification"]["target_variables"]
-            )
-            norm_path = self.processed_dir / METADATA_FILENAME
-            if not norm_path.is_file():
-                raise FileNotFoundError(
-                    f"Cannot resolve per-target normalization stats for the "
-                    f"fractional loss term: {norm_path} is missing."
-                )
-            with norm_path.open("r", encoding=UTF8_ENCODING) as f:
-                norm_meta = json.load(f)
-            per_key_stats = norm_meta.get("per_key_stats")
-            if not isinstance(per_key_stats, dict):
+        if loss_type == "hybrid_fractional":
+            self.lambda_mse = float(loss_cfg["lambda_mse"])
+            self.lambda_frac = float(loss_cfg["lambda_frac"])
+            self.fractional_epsilon = float(loss_cfg["fractional_epsilon"])
+
+            if self.lambda_mse == 0.0 and self.lambda_frac == 0.0:
                 raise ValueError(
-                    f"Malformed normalization metadata at {norm_path}: missing "
-                    "'per_key_stats'."
+                    "loss.lambda_mse and loss.lambda_frac are both zero; the "
+                    "training loss would be identically zero."
                 )
-            for var in target_vars:
-                stats = per_key_stats.get(var)
-                if not isinstance(stats, dict):
-                    raise KeyError(
-                        f"normalization_metadata.json has no per-target stats "
-                        f"for target variable '{var}'."
-                    )
-                method = stats.get("method")
-                if not isinstance(method, str):
-                    raise ValueError(
-                        f"normalization_metadata.json entry for '{var}' is "
-                        "missing a 'method' string."
-                    )
-                self._target_methods.append(method)
-                self._target_stats.append(stats)
+
+            if self.lambda_frac > 0.0:
+                target_vars = self._load_per_target_norm_stats(
+                    "fractional loss term"
+                )
+                logger.info(
+                    "hybrid_fractional loss: lambda_mse=%g lambda_frac=%g "
+                    "fractional_epsilon=%g; per-target denorm methods=%s",
+                    self.lambda_mse,
+                    self.lambda_frac,
+                    self.fractional_epsilon,
+                    list(zip(target_vars, self._target_methods)),
+                )
+            else:
+                logger.info(
+                    "hybrid_fractional loss: lambda_mse=%g lambda_frac=%g "
+                    "(fractional term disabled).",
+                    self.lambda_mse,
+                    self.lambda_frac,
+                )
+            return
+
+        if loss_type == "signed_log_adaptive":
+            target_vars = self._load_per_target_norm_stats(
+                "signed_log_adaptive loss"
+            )
+            self.loss_module = AdaptiveSignedLogLoss(
+                loss_cfg=loss_cfg,
+                target_methods=self._target_methods,
+                target_stats=self._target_stats,
+            ).to(self.device)
             logger.info(
-                "Mixed loss: lambda_mse=%g lambda_frac=%g fractional_epsilon=%g; "
-                "per-target denorm methods=%s",
-                self.lambda_mse,
-                self.lambda_frac,
-                self.fractional_epsilon,
+                "signed_log_adaptive loss: lambda_z=%g lambda_phys=%g "
+                "weight_mode=%s weight_power=%g w_min=%g w_max=%g p_norm=%d; "
+                "per-target methods=%s; channel_weights=%s",
+                self.loss_module.lambda_z,
+                self.loss_module.lambda_phys,
+                self.loss_module.weight_mode,
+                self.loss_module.weight_power,
+                self.loss_module.w_min,
+                self.loss_module.w_max,
+                self.loss_module.p_norm,
                 list(zip(target_vars, self._target_methods)),
+                self.loss_module.channel_weights.detach().cpu().tolist(),
             )
-        else:
-            logger.info(
-                "Mixed loss: lambda_mse=%g lambda_frac=%g (fractional term disabled).",
-                self.lambda_mse,
-                self.lambda_frac,
+            return
+
+        # validate_config rejects unknown types upstream; keep this as
+        # defense-in-depth in case validation is bypassed.
+        raise ValueError(
+            f"Unknown loss.type {loss_type!r}. "
+            "Allowed: 'signed_log_adaptive', 'hybrid_fractional'."
+        )
+
+    def _load_per_target_norm_stats(self, context_label: str) -> List[str]:
+        """Populate ``self._target_methods``/``self._target_stats`` from metadata.
+
+        Returns the ordered list of target variable names so the caller can use
+        it for logging without re-reading the config.
+        """
+        target_vars: List[str] = list(
+            self.cfg["data_specification"]["target_variables"]
+        )
+        norm_path = self.processed_dir / METADATA_FILENAME
+        if not norm_path.is_file():
+            raise FileNotFoundError(
+                f"Cannot resolve per-target normalization stats for the "
+                f"{context_label}: {norm_path} is missing."
             )
+        with norm_path.open("r", encoding=UTF8_ENCODING) as f:
+            norm_meta = json.load(f)
+        per_key_stats = norm_meta.get("per_key_stats")
+        if not isinstance(per_key_stats, dict):
+            raise ValueError(
+                f"Malformed normalization metadata at {norm_path}: missing "
+                "'per_key_stats'."
+            )
+        for var in target_vars:
+            stats = per_key_stats.get(var)
+            if not isinstance(stats, dict):
+                raise KeyError(
+                    f"normalization_metadata.json has no per-target stats "
+                    f"for target variable '{var}'."
+                )
+            method = stats.get("method")
+            if not isinstance(method, str):
+                raise ValueError(
+                    f"normalization_metadata.json entry for '{var}' is "
+                    "missing a 'method' string."
+                )
+            self._target_methods.append(method)
+            self._target_stats.append(stats)
+        return target_vars
 
     def _denormalize_targets_per_channel(self, x: torch.Tensor) -> torch.Tensor:
         """Denormalize a [..., C] target/prediction tensor channel-by-channel.
@@ -805,21 +869,43 @@ class ModelTrainer:
             "num_parameters": sum(p.numel() for p in self.model.parameters()),
             "num_trainable": sum(p.numel() for p in self.model.parameters() if p.requires_grad),
             "padding_convention": "True = padding position (PyTorch standard)",
-            "loss": {
-                "lambda_mse": self.lambda_mse,
-                "lambda_frac": self.lambda_frac,
-                "fractional_epsilon": self.fractional_epsilon,
-                "target_methods": list(
-                    zip(
-                        self.cfg["data_specification"]["target_variables"],
-                        self._target_methods,
-                    )
-                ),
-            },
+            "loss": self._build_loss_metadata(),
         }
         # Use compact format for metadata
         if not save_json(metadata, self.save_dir / "training_metadata.json", compact=True):
             raise RuntimeError("Failed to save training_metadata.json.")
+
+    def _build_loss_metadata(self) -> Dict[str, Any]:
+        """Return the active-loss metadata block for ``training_metadata.json``."""
+        target_methods = list(
+            zip(
+                self.cfg["data_specification"]["target_variables"],
+                self._target_methods,
+            )
+        )
+        if self.loss_type == "hybrid_fractional":
+            return {
+                "type": self.loss_type,
+                "lambda_mse": self.lambda_mse,
+                "lambda_frac": self.lambda_frac,
+                "fractional_epsilon": self.fractional_epsilon,
+                "target_methods": target_methods,
+            }
+        if self.loss_type == "signed_log_adaptive":
+            assert self.loss_module is not None
+            return {
+                "type": self.loss_type,
+                "lambda_z": self.loss_module.lambda_z,
+                "lambda_phys": self.loss_module.lambda_phys,
+                "weight_mode": self.loss_module.weight_mode,
+                "weight_power": self.loss_module.weight_power,
+                "w_min": self.loss_module.w_min,
+                "w_max": self.loss_module.w_max,
+                "p_norm": self.loss_module.p_norm,
+                "channel_weights": self.loss_module.channel_weights.detach().cpu().tolist(),
+                "target_methods": target_methods,
+            }
+        raise ValueError(f"Unknown loss type {self.loss_type!r}; cannot build metadata.")
     
     def train(self) -> float:
         """
@@ -1032,32 +1118,41 @@ class ModelTrainer:
                     # Loss is computed per element, then reduced only across valid
                     # non-padding target elements. This keeps right-padding completely
                     # out of the training objective.
-                    unreduced_mse = self.criterion(predictions, targets)
-                    _assert_finite_tensor(
-                        unreduced_mse,
-                        label="unreduced loss",
-                        mode=mode,
-                        batch_idx=batch_idx,
-                    )
-
-                    if self.lambda_frac > 0.0:
-                        pred_phys = self._denormalize_targets_per_channel(predictions)
-                        targ_phys = self._denormalize_targets_per_channel(targets)
-                        unreduced_frac = (pred_phys - targ_phys).pow(2) / (
-                            targ_phys.pow(2) + self.fractional_epsilon
-                        )
+                    if self.loss_module is not None:
+                        unreduced_combined = self.loss_module(predictions, targets)
                         _assert_finite_tensor(
-                            unreduced_frac,
-                            label="unreduced fractional loss",
+                            unreduced_combined,
+                            label="unreduced signed-log loss",
                             mode=mode,
                             batch_idx=batch_idx,
                         )
-                        unreduced_combined = (
-                            self.lambda_mse * unreduced_mse
-                            + self.lambda_frac * unreduced_frac
-                        )
                     else:
-                        unreduced_combined = self.lambda_mse * unreduced_mse
+                        unreduced_mse = self.criterion(predictions, targets)
+                        _assert_finite_tensor(
+                            unreduced_mse,
+                            label="unreduced loss",
+                            mode=mode,
+                            batch_idx=batch_idx,
+                        )
+
+                        if self.lambda_frac > 0.0:
+                            pred_phys = self._denormalize_targets_per_channel(predictions)
+                            targ_phys = self._denormalize_targets_per_channel(targets)
+                            unreduced_frac = (pred_phys - targ_phys).pow(2) / (
+                                targ_phys.pow(2) + self.fractional_epsilon
+                            )
+                            _assert_finite_tensor(
+                                unreduced_frac,
+                                label="unreduced fractional loss",
+                                mode=mode,
+                                batch_idx=batch_idx,
+                            )
+                            unreduced_combined = (
+                                self.lambda_mse * unreduced_mse
+                                + self.lambda_frac * unreduced_frac
+                            )
+                        else:
+                            unreduced_combined = self.lambda_mse * unreduced_mse
 
                     valid_steps = ~target_masks
                     valid_step_mask = valid_steps.unsqueeze(-1)

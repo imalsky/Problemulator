@@ -31,9 +31,22 @@
 #     REBUILD_PROCESSED=1 is set explicitly.
 #
 # By default this trains the tuned transformer (transformer_main.jsonc), whose
-# architecture comes from the best trial of tune_rt_tune_20260508_160639.
+# architecture comes from the best trial of tune_rt_tune_20260508_160639. This
+# is the "best guess" transformer baseline — submit alongside tune.sh to
+# get a current best while the search runs.
 # Models in CONFIG_NAMES train sequentially in the listed order, sharing the
 # processed data cache.
+#
+# Side-by-side with tune.sh:
+#     # 1. Make sure data/processed/ exists and is current. If unsure, run
+#     #    normalize.sh first (CPU-only, ~minutes):
+#     sbatch Problemulator/supercomputer_cmds/normalize.sh
+#     # 2. Then submit both jobs in parallel:
+#     sbatch Problemulator/supercomputer_cmds/train.sh
+#     sbatch Problemulator/supercomputer_cmds/tune.sh
+#     # train.sh writes to models/transformer_main/, tune.sh writes to
+#     # models/tune_<study>/. Both read data/processed/ read-only when the
+#     # fingerprint matches, so they cannot clobber each other.
 #
 # Overrides (optional):
 #     MERGED_NAME=picaso_results_10M.h5 sbatch Problemulator/supercomputer_cmds/train.sh

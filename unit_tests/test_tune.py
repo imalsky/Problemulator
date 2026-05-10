@@ -75,6 +75,40 @@ class TuneControlFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "resolved before sampling"):
             tune._choose_model_type(_FakeTrial(0), "config")
 
+    def test_choose_model_type_sequential_split(self) -> None:
+        # First half (0..n_trials_lstm-1) -> lstm, rest -> transformer.
+        self.assertEqual(
+            tune._choose_model_type(_FakeTrial(0), "sequential", n_trials_lstm=32),
+            "lstm",
+        )
+        self.assertEqual(
+            tune._choose_model_type(_FakeTrial(31), "sequential", n_trials_lstm=32),
+            "lstm",
+        )
+        self.assertEqual(
+            tune._choose_model_type(_FakeTrial(32), "sequential", n_trials_lstm=32),
+            "transformer",
+        )
+        self.assertEqual(
+            tune._choose_model_type(_FakeTrial(63), "sequential", n_trials_lstm=32),
+            "transformer",
+        )
+
+    def test_choose_model_type_sequential_requires_n_trials_lstm(self) -> None:
+        with self.assertRaisesRegex(ValueError, "n_trials_lstm"):
+            tune._choose_model_type(_FakeTrial(0), "sequential")
+
+    def test_build_study_sequential_uses_nop_pruner(self) -> None:
+        args = argparse.Namespace(
+            sampler_seed=42,
+            model_family="sequential",
+            study_name="unit_test_sequential",
+            storage=None,
+            prune_warmup_epochs=10,
+        )
+        study = tune._build_study(args)
+        self.assertIsInstance(study.pruner, optuna.pruners.NopPruner)
+
     def test_objective_prunes_model_side_nonfinite_trials(self) -> None:
         original_trainer = tune.TunerCallbackTrainer
         tune.TunerCallbackTrainer = _ModelNonFiniteTrainer

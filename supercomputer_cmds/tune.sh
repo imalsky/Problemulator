@@ -14,15 +14,28 @@
 #SBATCH --mail-user=isaac.n.malsky@jpl.nasa.gov
 
 # Drive the Optuna hyperparameter search defined in src/tune.py.
-# By default, tunes the model family declared by BASE_CONFIG (currently
-# config/lstm_v2.jsonc → 64 LSTM trials). Set MODEL_FAMILY=both for a fair
-# transformer-vs-LSTM ablation with no cross-architecture pruning, or override
-# BASE_CONFIG to sweep the transformer instead. Only the top 5 checkpoints are
-# kept.
+# Default layout: MODEL_FAMILY=sequential with N_TRIALS=64 -> 32 LSTM trials
+# (trials 0-31), followed by 32 transformer trials (trials 32-63). Both phases
+# run with NopPruner so no cross-architecture median-pruning bias creeps in.
+# Override MODEL_FAMILY for other layouts: 'both' (interleaved by trial number),
+# 'transformer'/'lstm' (single architecture), or 'config' (whatever the base
+# config declares). Only the top 5 checkpoints are kept.
 #
 # Pre-requisite: at least one successful train.sh run, so that
-# data/raw/$TRAIN_RAW_NAME exists. tune.sh will not merge
-# shards itself.
+# data/raw/$TRAIN_RAW_NAME exists AND data/processed/ has a current fingerprint.
+# tune.sh will not merge shards itself, and will hard-fail if the processed
+# cache is missing or stale (rebuild_processed_data is forced false to avoid
+# clobbering a parallel train.sh). If you don't have a current cache yet, run
+# normalize.sh first (CPU-only, ~minutes).
+#
+# Side-by-side with train.sh:
+#     # 1. Bootstrap data/processed/ if needed (skip if already current):
+#     sbatch Problemulator/supercomputer_cmds/normalize.sh
+#     # 2. Submit both jobs in parallel:
+#     sbatch Problemulator/supercomputer_cmds/train.sh    # baseline transformer
+#     sbatch Problemulator/supercomputer_cmds/tune.sh     # 32 LSTM + 32 transformer
+#     # tune.sh writes to models/tune_<study>/; train.sh writes to
+#     # models/transformer_main/. Both read data/processed/ read-only.
 #
 # Submit:
 #     sbatch Problemulator/supercomputer_cmds/tune.sh
@@ -36,8 +49,10 @@
 #     STUDY_NAME=rt_tune_2026 sbatch Problemulator/supercomputer_cmds/tune.sh
 #     N_TRIALS=500 TIMEOUT_SECONDS=86400 sbatch Problemulator/supercomputer_cmds/tune.sh
 #     EPOCHS=100 PATIENCE=15 DATA_FRACTION=1.0 sbatch Problemulator/supercomputer_cmds/tune.sh
-#     BASE_CONFIG=config/transformer_v2.jsonc sbatch Problemulator/supercomputer_cmds/tune.sh   # sweep transformers instead
-#     MODEL_FAMILY=both sbatch Problemulator/supercomputer_cmds/tune.sh                          # alternate transformer/LSTM trials
+#     BASE_CONFIG=config/transformer_v2.jsonc sbatch Problemulator/supercomputer_cmds/tune.sh   # base config (architecture-agnostic for sequential/both)
+#     MODEL_FAMILY=both sbatch Problemulator/supercomputer_cmds/tune.sh                          # alternate transformer/LSTM trials by trial number
+#     MODEL_FAMILY=lstm sbatch Problemulator/supercomputer_cmds/tune.sh                          # single-architecture sweep
+#     N_TRIALS_LSTM=16 N_TRIALS=48 MODEL_FAMILY=sequential sbatch ...                            # asymmetric split (16 LSTM + 32 transformer)
 
 set -euo pipefail
 
@@ -84,10 +99,12 @@ CONDA_ENV="${CONDA_ENV:-nn}"
 MERGED_NAME="${MERGED_NAME:-picaso_results_5M.h5}"
 TRAIN_RAW_NAME="${TRAIN_RAW_NAME:-$MERGED_NAME}"
 BASE_CONFIG="${BASE_CONFIG:-config/lstm_v2.jsonc}"
-MODEL_FAMILY="${MODEL_FAMILY:-config}"
+MODEL_FAMILY="${MODEL_FAMILY:-sequential}"
 STUDY_NAME="${STUDY_NAME:-rt_tune_$(date +%Y%m%d_%H%M%S)}"
-# With MODEL_FAMILY=both, 64 trials = 32 transformer + 32 LSTM.
+# With MODEL_FAMILY=sequential, 64 trials = 32 LSTM (trials 0-31) followed by
+# 32 transformer (trials 32-63). Override N_TRIALS_LSTM to change the split.
 N_TRIALS="${N_TRIALS:-64}"
+N_TRIALS_LSTM="${N_TRIALS_LSTM:-}"
 # ~69h leaves a 3h margin under the 72h walltime so the leaderboard flush
 # can complete before SLURM hard-kills the job.
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-248400}"
@@ -142,6 +159,7 @@ echo "Problemulator:   $PROBLEMULATOR_ROOT"
 echo "Conda env:       $CONDA_ENV"
 echo "Base config:     $BASE_CONFIG_PATH"
 echo "Model family:    $MODEL_FAMILY"
+echo "LSTM split:      ${N_TRIALS_LSTM:-<auto: N_TRIALS/2 if sequential>}"
 echo "Study name:      $STUDY_NAME"
 echo "Trials cap:      $N_TRIALS"
 echo "Timeout (s):     $TIMEOUT_SECONDS"
@@ -150,14 +168,20 @@ echo "Data fraction:   $DATA_FRACTION"
 echo "Patience:        $PATIENCE"
 echo "------------------------------------------------"
 
-python -u src/tune.py \
-    --base-config "$BASE_CONFIG_PATH" \
-    --study-name  "$STUDY_NAME" \
-    --n-trials    "$N_TRIALS" \
-    --timeout     "$TIMEOUT_SECONDS" \
-    --model-family "$MODEL_FAMILY" \
-    --epochs      "$EPOCHS" \
-    --data-fraction "$DATA_FRACTION" \
+TUNE_ARGS=(
+    --base-config "$BASE_CONFIG_PATH"
+    --study-name  "$STUDY_NAME"
+    --n-trials    "$N_TRIALS"
+    --timeout     "$TIMEOUT_SECONDS"
+    --model-family "$MODEL_FAMILY"
+    --epochs      "$EPOCHS"
+    --data-fraction "$DATA_FRACTION"
     --patience    "$PATIENCE"
+)
+if [[ -n "$N_TRIALS_LSTM" ]]; then
+    TUNE_ARGS+=(--n-trials-lstm "$N_TRIALS_LSTM")
+fi
+
+python -u src/tune.py "${TUNE_ARGS[@]}"
 
 echo "=== Tuning job completed ==="

@@ -25,7 +25,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Prevent MKL/OpenMP library conflicts before importing torch (mirrors main.py).
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
@@ -73,6 +73,7 @@ MODEL_SIDE_NONFINITE_LABELS = {
     "model predictions",
     "unreduced loss",
     "unreduced fractional loss",
+    "unreduced signed-log loss",
     "masked loss",
 }
 
@@ -196,7 +197,11 @@ class TunerCallbackTrainer(ModelTrainer):
             raise optuna.TrialPruned(f"Pruned at epoch {epoch}, val={val_loss:.3e}.")
 
 
-def _choose_model_type(trial: optuna.Trial, requested_family: str) -> str:
+def _choose_model_type(
+    trial: optuna.Trial,
+    requested_family: str,
+    n_trials_lstm: Optional[int] = None,
+) -> str:
     """Select model family without letting TPE abandon one branch.
 
     ``both`` alternates by trial number:
@@ -204,12 +209,25 @@ def _choose_model_type(trial: optuna.Trial, requested_family: str) -> str:
     - odd trials: LSTM
 
     This makes early comparisons balanced and deterministic.
+
+    ``sequential`` runs LSTM trials first, then transformer trials:
+    - trial.number < n_trials_lstm  -> "lstm"
+    - trial.number >= n_trials_lstm -> "transformer"
+
+    The split index ``n_trials_lstm`` must be supplied by the caller
+    (typically ``args.n_trials // 2``).
     """
     family = str(requested_family).lower()
     if family == "config":
         raise ValueError("'config' model family must be resolved before sampling.")
     if family == "both":
         return "transformer" if trial.number % 2 == 0 else "lstm"
+    if family == "sequential":
+        if n_trials_lstm is None:
+            raise ValueError(
+                "model_family='sequential' requires n_trials_lstm to be provided."
+            )
+        return "lstm" if trial.number < int(n_trials_lstm) else "transformer"
     if family in {"transformer", "lstm"}:
         return family
     raise ValueError(f"Unknown model family '{requested_family}'.")
@@ -247,7 +265,7 @@ def _suggest_common_model_block(trial: optuna.Trial) -> Dict[str, Any]:
 def _suggest_search_space(
     trial: optuna.Trial,
     base_config: Dict[str, Any],
-    requested_family: str,
+    args: argparse.Namespace,
 ) -> Dict[str, Any]:
     """Sample a compact per-trial config delta.
 
@@ -264,7 +282,8 @@ def _suggest_search_space(
     """
     del base_config  # Kept in signature for future extension and objective symmetry.
 
-    model_type = _choose_model_type(trial, requested_family)
+    n_trials_lstm = getattr(args, "n_trials_lstm", None)
+    model_type = _choose_model_type(trial, args.model_family, n_trials_lstm)
     trial.set_user_attr("model_type", model_type)
 
     common = _suggest_common_model_block(trial)
@@ -379,7 +398,7 @@ def _build_objective(
     """Build the Optuna objective bound to invariants resolved once at startup."""
 
     def objective(trial: optuna.Trial) -> float:
-        suggested = _suggest_search_space(trial, base_config, args.model_family)
+        suggested = _suggest_search_space(trial, base_config, args)
         forced = _forced_overrides(args, trial.number, study_name)
 
         merged = _deep_merge(base_config, suggested)
@@ -575,12 +594,15 @@ def _build_study(args: argparse.Namespace) -> optuna.Study:
     # When comparing both architectures, MedianPruner is unfair: transformer
     # trials converge faster and dominate the shared median, causing LSTM trials
     # to be pruned before they reach their asymptotic loss. Use NopPruner so
-    # every trial runs to early-stopping completion on equal footing.
-    if args.model_family == "both":
+    # every trial runs to early-stopping completion on equal footing. The same
+    # reasoning applies to the strictly sequential layout (LSTM phase then
+    # transformer phase) — there is still no fair shared median.
+    if args.model_family in {"both", "sequential"}:
         pruner: optuna.pruners.BasePruner = optuna.pruners.NopPruner()
         logger.info(
-            "model_family='both': using NopPruner so both architectures run "
-            "to early-stopping completion without cross-architecture bias."
+            "model_family=%r: using NopPruner so both architectures run "
+            "to early-stopping completion without cross-architecture bias.",
+            args.model_family,
         )
     else:
         pruner = optuna.pruners.MedianPruner(
@@ -638,14 +660,25 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-family",
         type=str,
-        choices=("config", "both", "transformer", "lstm"),
+        choices=("config", "both", "sequential", "transformer", "lstm"),
         default="config",
         help=(
             "'config' uses model_hyperparameters.model_type from the base config. "
-            "'both' alternates transformer/LSTM trials."
+            "'both' alternates transformer/LSTM trials by trial number. "
+            "'sequential' runs the first --n-trials-lstm trials as LSTM, the "
+            "remainder as transformer (default split is --n-trials // 2)."
         ),
     )
     parser.add_argument("--n-trials", type=int, default=N_TRIALS_DEFAULT)
+    parser.add_argument(
+        "--n-trials-lstm",
+        type=int,
+        default=None,
+        help=(
+            "LSTM/transformer split index for --model-family=sequential. "
+            "Defaults to --n-trials // 2 (e.g. 64 -> 32 LSTM, then 32 transformer)."
+        ),
+    )
     parser.add_argument(
         "--timeout",
         type=int,
@@ -701,6 +734,25 @@ def main() -> int:
         if args.model_family == "config":
             args.model_family = str(base_config["model_hyperparameters"]["model_type"]).lower()
             logger.info("Resolved --model-family config to '%s'.", args.model_family)
+
+        if args.model_family == "sequential":
+            if args.n_trials_lstm is None:
+                args.n_trials_lstm = int(args.n_trials) // 2
+            if not (0 <= int(args.n_trials_lstm) <= int(args.n_trials)):
+                raise ValueError(
+                    "--n-trials-lstm must be in [0, --n-trials]; got "
+                    f"{args.n_trials_lstm} with --n-trials={args.n_trials}."
+                )
+            logger.info(
+                "model_family='sequential': trials 0..%d -> lstm, %d..%d -> transformer.",
+                int(args.n_trials_lstm) - 1,
+                int(args.n_trials_lstm),
+                int(args.n_trials) - 1,
+            )
+        elif args.n_trials_lstm is not None:
+            raise ValueError(
+                "--n-trials-lstm is only valid with --model-family=sequential."
+            )
 
         seed_everything(int(args.sampler_seed))
 
@@ -766,13 +818,26 @@ def main() -> int:
 
         _emit_leaderboard(study, study_dir)
 
-        if study.best_trial is not None:
+        # Optuna's study.best_trial raises ValueError("Record does not exist")
+        # when zero trials completed (e.g., every trial pruned). Guard against
+        # that so the tuner exits cleanly with the leaderboard already written.
+        try:
+            best = study.best_trial
+        except ValueError:
+            best = None
+
+        if best is not None:
             logger.info(
                 "Best trial: number=%d value=%.6e params=%s user_attrs=%s",
-                study.best_trial.number,
-                float(study.best_trial.value),
-                json.dumps(study.best_trial.params, sort_keys=True),
-                json.dumps(study.best_trial.user_attrs, sort_keys=True, default=str),
+                best.number,
+                float(best.value),
+                json.dumps(best.params, sort_keys=True),
+                json.dumps(best.user_attrs, sort_keys=True, default=str),
+            )
+        else:
+            logger.warning(
+                "No completed trials in study '%s'; no best trial to report.",
+                study.study_name,
             )
 
         return 0

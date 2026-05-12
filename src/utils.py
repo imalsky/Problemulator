@@ -828,15 +828,18 @@ def validate_config(config: Dict[str, Any]) -> None:
     loss_section = require_section("loss")
     if "type" not in loss_section:
         raise ValueError(
-            "'loss.type' is required. Allowed values: 'signed_log_adaptive', "
-            "'hybrid_fractional'."
+            "'loss.type' is required. Allowed values: 'signed_log_adaptive'."
         )
     loss_type_raw = loss_section["type"]
     if not isinstance(loss_type_raw, str):
         raise ValueError("'loss.type' must be a string.")
     loss_type = loss_type_raw.lower()
 
-    legacy_loss_keys = {"lambda_mse", "lambda_frac", "fractional_epsilon"}
+    if loss_type != "signed_log_adaptive":
+        raise ValueError(
+            f"Unknown loss.type {loss_type_raw!r}. Allowed: 'signed_log_adaptive'."
+        )
+
     signed_log_keys = {
         "lambda_z",
         "lambda_phys",
@@ -846,93 +849,51 @@ def validate_config(config: Dict[str, Any]) -> None:
         "w_max",
         "p_norm",
     }
-
-    if loss_type == "hybrid_fractional":
-        missing_loss_keys = legacy_loss_keys - set(loss_section.keys())
-        if missing_loss_keys:
-            raise ValueError(
-                "Missing required loss keys for type='hybrid_fractional': "
-                f"{sorted(missing_loss_keys)}"
-            )
-        stray_keys = signed_log_keys & set(loss_section.keys())
-        if stray_keys:
-            raise ValueError(
-                "loss.type='hybrid_fractional' but signed_log_adaptive keys are "
-                f"also present: {sorted(stray_keys)}. Remove them or change loss.type."
-            )
-        for non_neg_key in ("lambda_mse", "lambda_frac"):
-            value = loss_section[non_neg_key]
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
-                raise ValueError(f"'loss.{non_neg_key}' must be numeric.")
-            value_f = float(value)
-            if not math.isfinite(value_f):
-                raise ValueError(f"'loss.{non_neg_key}' must be finite.")
-            if value_f < 0.0:
-                raise ValueError(f"'loss.{non_neg_key}' must be >= 0.")
-        eps_value = loss_section["fractional_epsilon"]
-        if not isinstance(eps_value, (int, float)) or isinstance(eps_value, bool):
-            raise ValueError("'loss.fractional_epsilon' must be numeric.")
-        if not math.isfinite(float(eps_value)):
-            raise ValueError("'loss.fractional_epsilon' must be finite.")
-        if float(eps_value) <= 0.0:
-            raise ValueError("'loss.fractional_epsilon' must be > 0.")
-    elif loss_type == "signed_log_adaptive":
-        missing_loss_keys = signed_log_keys - set(loss_section.keys())
-        if missing_loss_keys:
-            raise ValueError(
-                "Missing required loss keys for type='signed_log_adaptive': "
-                f"{sorted(missing_loss_keys)}"
-            )
-        stray_keys = legacy_loss_keys & set(loss_section.keys())
-        if stray_keys:
-            raise ValueError(
-                "loss.type='signed_log_adaptive' but hybrid_fractional keys are "
-                f"also present: {sorted(stray_keys)}. Remove them or change loss.type."
-            )
-        for non_neg_key in ("lambda_z", "lambda_phys"):
-            value = loss_section[non_neg_key]
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
-                raise ValueError(f"'loss.{non_neg_key}' must be numeric.")
-            value_f = float(value)
-            if not math.isfinite(value_f):
-                raise ValueError(f"'loss.{non_neg_key}' must be finite.")
-            if value_f < 0.0:
-                raise ValueError(f"'loss.{non_neg_key}' must be >= 0.")
-        if (
-            float(loss_section["lambda_z"]) == 0.0
-            and float(loss_section["lambda_phys"]) == 0.0
-        ):
-            raise ValueError(
-                "'loss.lambda_z' and 'loss.lambda_phys' cannot both be zero."
-            )
-        weight_mode = loss_section["weight_mode"]
-        if not isinstance(weight_mode, str) or weight_mode.lower() not in {
-            "uniform",
-            "range",
-        }:
-            raise ValueError("'loss.weight_mode' must be 'uniform' or 'range'.")
-        weight_power = loss_section["weight_power"]
-        if not isinstance(weight_power, (int, float)) or isinstance(weight_power, bool):
-            raise ValueError("'loss.weight_power' must be numeric.")
-        if not math.isfinite(float(weight_power)) or float(weight_power) < 0.0:
-            raise ValueError("'loss.weight_power' must be a finite non-negative number.")
-        w_min = loss_section["w_min"]
-        w_max = loss_section["w_max"]
-        for label, value in (("w_min", w_min), ("w_max", w_max)):
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
-                raise ValueError(f"'loss.{label}' must be numeric.")
-            if not math.isfinite(float(value)):
-                raise ValueError(f"'loss.{label}' must be finite.")
-        if not (0.0 < float(w_min) <= float(w_max)):
-            raise ValueError("'loss' weight bounds must satisfy 0 < w_min <= w_max.")
-        p_norm = loss_section["p_norm"]
-        if isinstance(p_norm, bool) or not isinstance(p_norm, int) or p_norm not in (1, 2):
-            raise ValueError("'loss.p_norm' must be the integer 1 or 2.")
-    else:
+    missing_loss_keys = signed_log_keys - set(loss_section.keys())
+    if missing_loss_keys:
         raise ValueError(
-            f"Unknown loss.type {loss_type_raw!r}. Allowed: "
-            "'signed_log_adaptive', 'hybrid_fractional'."
+            "Missing required loss keys for type='signed_log_adaptive': "
+            f"{sorted(missing_loss_keys)}"
         )
+    for non_neg_key in ("lambda_z", "lambda_phys"):
+        value = loss_section[non_neg_key]
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(f"'loss.{non_neg_key}' must be numeric.")
+        value_f = float(value)
+        if not math.isfinite(value_f):
+            raise ValueError(f"'loss.{non_neg_key}' must be finite.")
+        if value_f < 0.0:
+            raise ValueError(f"'loss.{non_neg_key}' must be >= 0.")
+    if (
+        float(loss_section["lambda_z"]) == 0.0
+        and float(loss_section["lambda_phys"]) == 0.0
+    ):
+        raise ValueError(
+            "'loss.lambda_z' and 'loss.lambda_phys' cannot both be zero."
+        )
+    weight_mode = loss_section["weight_mode"]
+    if not isinstance(weight_mode, str) or weight_mode.lower() not in {
+        "uniform",
+        "range",
+    }:
+        raise ValueError("'loss.weight_mode' must be 'uniform' or 'range'.")
+    weight_power = loss_section["weight_power"]
+    if not isinstance(weight_power, (int, float)) or isinstance(weight_power, bool):
+        raise ValueError("'loss.weight_power' must be numeric.")
+    if not math.isfinite(float(weight_power)) or float(weight_power) < 0.0:
+        raise ValueError("'loss.weight_power' must be a finite non-negative number.")
+    w_min = loss_section["w_min"]
+    w_max = loss_section["w_max"]
+    for label, value in (("w_min", w_min), ("w_max", w_max)):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(f"'loss.{label}' must be numeric.")
+        if not math.isfinite(float(value)):
+            raise ValueError(f"'loss.{label}' must be finite.")
+    if not (0.0 < float(w_min) <= float(w_max)):
+        raise ValueError("'loss' weight bounds must satisfy 0 < w_min <= w_max.")
+    p_norm = loss_section["p_norm"]
+    if isinstance(p_norm, bool) or not isinstance(p_norm, int) or p_norm not in (1, 2):
+        raise ValueError("'loss.p_norm' must be the integer 1 or 2.")
 
     # miscellaneous_settings
     misc = require_section("miscellaneous_settings")

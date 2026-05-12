@@ -87,21 +87,24 @@ TIMEOUT_DEFAULT_SECONDS = 248_400  # ~69 h; timeout still acts as the real cap.
 
 # Hard cap on dim_feedforward = d_model * ffn_mult. Pairs that exceed this are
 # pruned with optuna.TrialPruned so TPE doesn't waste sampler budget on them.
-DIM_FEEDFORWARD_MAX = 2048
+# Raised from 2048 to 4096 so d_model=512 * ffn_mult=8 (the prior loss-era
+# winner) is reachable again under the new signed_log_adaptive loss.
+DIM_FEEDFORWARD_MAX = 4096
 
 # -----------------------------------------------------------------------------
 # Compact search space.
 # -----------------------------------------------------------------------------
 #
 # Search space is informed by the prior 60-trial sweep at
-# Problemulator/models/tune_rt_tune_20260505_114151/ and a manuscript reviewer's
-# specific concern that zero-dropout configurations may not be robust. Knobs
-# that varied across the prior top-5 (d_model, ffn_mult, num_layers, dropout,
-# attention_dropout, film_clamp, output_head_divisor, output_head_dropout_factor)
-# are still sampled. Knobs that the prior sweep settled (nhead=4, ffn_type=gelu,
-# use_qk_norm=True, bidirectional=True) are now fixed to save trials. Dropout
-# choices include 0.1 specifically to give the reviewer's concern a fair test
-# under the new hybrid loss.
+# Problemulator/models/tune_rt_tune_20260505_114151/ (hybrid_fractional loss)
+# and the May-2026 64-trial sweep at tune_rt_tune_20260510_104818/
+# (signed_log_adaptive loss). In the latter, both best architectures hit the
+# num_layers ceiling (transformer at 5, LSTM at 3) and the transformer was
+# further constrained by DIM_FEEDFORWARD_MAX=2048 (excluded d_model=512 *
+# ffn_mult=8). This round raises those caps so the search can probe whether
+# more capacity actually helps under the new loss.
+# Knobs that the prior sweep settled (nhead=4, ffn_type=gelu, use_qk_norm=True,
+# bidirectional=True) remain fixed to save trial budget.
 
 # Shared architecture choices.
 # d_model=128 was consistently uncompetitive; removed.
@@ -124,13 +127,14 @@ FILM_CLAMP_CHOICES: Tuple[float, ...] = (5.0, 10.0, 50.0)
 TRANSFORMER_FFN_TYPE_FIXED: str = "gelu"
 TRANSFORMER_QK_NORM_FIXED: bool = True
 TRANSFORMER_NHEAD_FIXED: int = 4
-# num_layers=2 was consistently weak in the prior sweep; bumped to {3,4,5} so
-# the new search can probe whether deeper stacks help under the hybrid loss.
-TRANSFORMER_LAYER_CHOICES: Tuple[int, ...] = (3, 4, 5)
+# num_layers=2 was consistently weak; the May-2026 sweep at signed_log_adaptive
+# also hit the {3,4,5} ceiling (best trial at num_layers=5), so this round
+# extends the range to {3,4,5,6,7} to test whether deeper transformers help.
+TRANSFORMER_LAYER_CHOICES: Tuple[int, ...] = (3, 4, 5, 6, 7)
 # ffn_mult=8 won under the old loss with d_model=512 -> dim_feedforward=4096.
-# The new dim_feedforward<=2048 cap (DIM_FEEDFORWARD_MAX) makes (512, 8) and
-# (512, 4 with d_model=512 -> 2048 ok; 8 -> 4096 not ok) invalid. Invalid
-# (d_model, ffn_mult) pairs are pruned via optuna.TrialPruned at sample time.
+# DIM_FEEDFORWARD_MAX was raised back to 4096 above so (512, 8) is reachable
+# again under the new loss. Invalid (d_model, ffn_mult) pairs are pruned via
+# optuna.TrialPruned at sample time.
 TRANSFORMER_FFN_MULT_CHOICES: Tuple[int, ...] = (2, 4, 8)
 # attention_dropout: prior winners at 0.0; keep small nonzero range as
 # reviewer counter-evidence under the new loss. 0.1 was a clear outlier in the
@@ -140,8 +144,11 @@ TRANSFORMER_ATTENTION_DROPOUT_CHOICES: Tuple[float, ...] = (0.0, 0.025, 0.05)
 # LSTM-only choices.
 # bidirectional=False was 4–5× worse than True; fixed to True.
 # num_layers=1 was consistently weaker; removed.
+# The May-2026 signed_log_adaptive sweep's best LSTM hit num_layers=3 (the
+# prior ceiling) and val_loss was still descending at epoch 30, so the range
+# is extended to {2,3,4} this round.
 LSTM_BIDIRECTIONAL_FIXED: bool = True
-LSTM_LAYER_CHOICES: Tuple[int, ...] = (2, 3)
+LSTM_LAYER_CHOICES: Tuple[int, ...] = (2, 3, 4)
 
 
 def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
@@ -302,6 +309,15 @@ def _suggest_search_space(
             raise optuna.TrialPruned(
                 f"dim_feedforward={dim_feedforward} exceeds cap "
                 f"{DIM_FEEDFORWARD_MAX} (d_model={d_model} * ffn_mult={ffn_mult})."
+            )
+        # Budget guard: the largest combo (d_model=512, ffn_mult=8, num_layers>=6)
+        # roughly triples per-epoch wall-clock relative to the prior best trial
+        # and risks pushing the 64-trial sweep past the 72h SLURM walltime.
+        # Pruned here so TPE redirects its budget to smaller configs.
+        if d_model == 512 and ffn_mult == 8 and num_layers >= 6:
+            raise optuna.TrialPruned(
+                f"Skipping high-cost combo (d_model={d_model}, ffn_mult={ffn_mult}, "
+                f"num_layers={num_layers}) to keep the sweep within walltime."
             )
         attention_dropout = float(
             trial.suggest_categorical(

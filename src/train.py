@@ -23,7 +23,6 @@ from dataset import create_dataset
 from hardware import should_pin_memory
 from loss import AdaptiveSignedLogLoss
 from model import create_prediction_model
-from normalizer import DataNormalizer
 from utils import (
     METADATA_FILENAME,
     UTF8_ENCODING,
@@ -646,10 +645,7 @@ class ModelTrainer:
     
     def _setup_training_params(self, tp: Dict) -> None:
         """Setup training parameters and loss function."""
-        # Loss function (MSE with no reduction for masking)
-        self.criterion = nn.MSELoss(reduction="none")
-
-        # Mixed-loss weights and physical-space denorm metadata.
+        # Loss module + per-target normalization metadata.
         self._setup_loss_terms()
 
         # Gradient clipping
@@ -689,99 +685,48 @@ class ModelTrainer:
     def _setup_loss_terms(self) -> None:
         """Configure the active loss based on ``cfg['loss']['type']``.
 
-        Two implementations coexist:
-
-        ``signed_log_adaptive`` (default):
+        ``signed_log_adaptive`` (only supported type):
             ``L = lambda_z * masked_mean((pred_z - true_z)^2)
                 + lambda_phys * sum_c w_c
                               * |signed_log10(p_phys_c) - signed_log10(t_phys_c)|^p_norm``
 
             Implemented in :class:`loss.AdaptiveSignedLogLoss`. Stored as
             ``self.loss_module``; the trainer delegates the per-element loss
-            computation to that module and applies the same padding-mask
-            reduction as the legacy path.
-
-        ``hybrid_fractional`` (legacy):
-            ``L = lambda_mse * masked_mean(MSE_normalized)
-                + lambda_frac * masked_mean((p_phys - t_phys)^2 / (t_phys^2 + eps))``
-
-            Computed inline in :meth:`_run_epoch`. When ``lambda_frac == 0`` the
-            per-target denorm metadata is skipped entirely.
+            computation to that module and applies a padding-mask reduction.
         """
         loss_cfg = self.cfg["loss"]
         loss_type = str(loss_cfg["type"]).lower()
         self.loss_type = loss_type
 
-        # Reset shared fields. Each branch populates the ones it owns.
-        self.loss_module: Optional[nn.Module] = None
-        self.lambda_mse = 0.0
-        self.lambda_frac = 0.0
-        self.fractional_epsilon = 0.0
         self._target_methods: List[str] = []
         self._target_stats: List[Dict[str, Any]] = []
 
-        if loss_type == "hybrid_fractional":
-            self.lambda_mse = float(loss_cfg["lambda_mse"])
-            self.lambda_frac = float(loss_cfg["lambda_frac"])
-            self.fractional_epsilon = float(loss_cfg["fractional_epsilon"])
-
-            if self.lambda_mse == 0.0 and self.lambda_frac == 0.0:
-                raise ValueError(
-                    "loss.lambda_mse and loss.lambda_frac are both zero; the "
-                    "training loss would be identically zero."
-                )
-
-            if self.lambda_frac > 0.0:
-                target_vars = self._load_per_target_norm_stats(
-                    "fractional loss term"
-                )
-                logger.info(
-                    "hybrid_fractional loss: lambda_mse=%g lambda_frac=%g "
-                    "fractional_epsilon=%g; per-target denorm methods=%s",
-                    self.lambda_mse,
-                    self.lambda_frac,
-                    self.fractional_epsilon,
-                    list(zip(target_vars, self._target_methods)),
-                )
-            else:
-                logger.info(
-                    "hybrid_fractional loss: lambda_mse=%g lambda_frac=%g "
-                    "(fractional term disabled).",
-                    self.lambda_mse,
-                    self.lambda_frac,
-                )
-            return
-
-        if loss_type == "signed_log_adaptive":
-            target_vars = self._load_per_target_norm_stats(
-                "signed_log_adaptive loss"
+        if loss_type != "signed_log_adaptive":
+            # validate_config rejects unknown types upstream; keep this as
+            # defense-in-depth in case validation is bypassed.
+            raise ValueError(
+                f"Unknown loss.type {loss_type!r}. Allowed: 'signed_log_adaptive'."
             )
-            self.loss_module = AdaptiveSignedLogLoss(
-                loss_cfg=loss_cfg,
-                target_methods=self._target_methods,
-                target_stats=self._target_stats,
-            ).to(self.device)
-            logger.info(
-                "signed_log_adaptive loss: lambda_z=%g lambda_phys=%g "
-                "weight_mode=%s weight_power=%g w_min=%g w_max=%g p_norm=%d; "
-                "per-target methods=%s; channel_weights=%s",
-                self.loss_module.lambda_z,
-                self.loss_module.lambda_phys,
-                self.loss_module.weight_mode,
-                self.loss_module.weight_power,
-                self.loss_module.w_min,
-                self.loss_module.w_max,
-                self.loss_module.p_norm,
-                list(zip(target_vars, self._target_methods)),
-                self.loss_module.channel_weights.detach().cpu().tolist(),
-            )
-            return
 
-        # validate_config rejects unknown types upstream; keep this as
-        # defense-in-depth in case validation is bypassed.
-        raise ValueError(
-            f"Unknown loss.type {loss_type!r}. "
-            "Allowed: 'signed_log_adaptive', 'hybrid_fractional'."
+        target_vars = self._load_per_target_norm_stats("signed_log_adaptive loss")
+        self.loss_module = AdaptiveSignedLogLoss(
+            loss_cfg=loss_cfg,
+            target_methods=self._target_methods,
+            target_stats=self._target_stats,
+        ).to(self.device)
+        logger.info(
+            "signed_log_adaptive loss: lambda_z=%g lambda_phys=%g "
+            "weight_mode=%s weight_power=%g w_min=%g w_max=%g p_norm=%d; "
+            "per-target methods=%s; channel_weights=%s",
+            self.loss_module.lambda_z,
+            self.loss_module.lambda_phys,
+            self.loss_module.weight_mode,
+            self.loss_module.weight_power,
+            self.loss_module.w_min,
+            self.loss_module.w_max,
+            self.loss_module.p_norm,
+            list(zip(target_vars, self._target_methods)),
+            self.loss_module.channel_weights.detach().cpu().tolist(),
         )
 
     def _load_per_target_norm_stats(self, context_label: str) -> List[str]:
@@ -824,26 +769,6 @@ class ModelTrainer:
             self._target_stats.append(stats)
         return target_vars
 
-    def _denormalize_targets_per_channel(self, x: torch.Tensor) -> torch.Tensor:
-        """Denormalize a [..., C] target/prediction tensor channel-by-channel.
-
-        Each channel uses the method/stats recorded in
-        ``normalization_metadata.json`` for the corresponding target variable.
-        """
-        if x.shape[-1] != len(self._target_methods):
-            raise ValueError(
-                f"Last dim of tensor ({x.shape[-1]}) does not match number of "
-                f"target variables ({len(self._target_methods)})."
-            )
-        chunks: List[torch.Tensor] = []
-        for c, (method, stats) in enumerate(
-            zip(self._target_methods, self._target_stats)
-        ):
-            chunks.append(
-                DataNormalizer.denormalize_tensor(x[..., c : c + 1], method, stats)
-            )
-        return torch.cat(chunks, dim=-1)
-
     def _setup_logging(self) -> None:
         """Setup training log file."""
         self.log_path = self.save_dir / "training_log.csv"
@@ -883,29 +808,19 @@ class ModelTrainer:
                 self._target_methods,
             )
         )
-        if self.loss_type == "hybrid_fractional":
-            return {
-                "type": self.loss_type,
-                "lambda_mse": self.lambda_mse,
-                "lambda_frac": self.lambda_frac,
-                "fractional_epsilon": self.fractional_epsilon,
-                "target_methods": target_methods,
-            }
-        if self.loss_type == "signed_log_adaptive":
-            assert self.loss_module is not None
-            return {
-                "type": self.loss_type,
-                "lambda_z": self.loss_module.lambda_z,
-                "lambda_phys": self.loss_module.lambda_phys,
-                "weight_mode": self.loss_module.weight_mode,
-                "weight_power": self.loss_module.weight_power,
-                "w_min": self.loss_module.w_min,
-                "w_max": self.loss_module.w_max,
-                "p_norm": self.loss_module.p_norm,
-                "channel_weights": self.loss_module.channel_weights.detach().cpu().tolist(),
-                "target_methods": target_methods,
-            }
-        raise ValueError(f"Unknown loss type {self.loss_type!r}; cannot build metadata.")
+        assert self.loss_module is not None
+        return {
+            "type": self.loss_type,
+            "lambda_z": self.loss_module.lambda_z,
+            "lambda_phys": self.loss_module.lambda_phys,
+            "weight_mode": self.loss_module.weight_mode,
+            "weight_power": self.loss_module.weight_power,
+            "w_min": self.loss_module.w_min,
+            "w_max": self.loss_module.w_max,
+            "p_norm": self.loss_module.p_norm,
+            "channel_weights": self.loss_module.channel_weights.detach().cpu().tolist(),
+            "target_methods": target_methods,
+        }
     
     def train(self) -> float:
         """
@@ -1118,41 +1033,13 @@ class ModelTrainer:
                     # Loss is computed per element, then reduced only across valid
                     # non-padding target elements. This keeps right-padding completely
                     # out of the training objective.
-                    if self.loss_module is not None:
-                        unreduced_combined = self.loss_module(predictions, targets)
-                        _assert_finite_tensor(
-                            unreduced_combined,
-                            label="unreduced signed-log loss",
-                            mode=mode,
-                            batch_idx=batch_idx,
-                        )
-                    else:
-                        unreduced_mse = self.criterion(predictions, targets)
-                        _assert_finite_tensor(
-                            unreduced_mse,
-                            label="unreduced loss",
-                            mode=mode,
-                            batch_idx=batch_idx,
-                        )
-
-                        if self.lambda_frac > 0.0:
-                            pred_phys = self._denormalize_targets_per_channel(predictions)
-                            targ_phys = self._denormalize_targets_per_channel(targets)
-                            unreduced_frac = (pred_phys - targ_phys).pow(2) / (
-                                targ_phys.pow(2) + self.fractional_epsilon
-                            )
-                            _assert_finite_tensor(
-                                unreduced_frac,
-                                label="unreduced fractional loss",
-                                mode=mode,
-                                batch_idx=batch_idx,
-                            )
-                            unreduced_combined = (
-                                self.lambda_mse * unreduced_mse
-                                + self.lambda_frac * unreduced_frac
-                            )
-                        else:
-                            unreduced_combined = self.lambda_mse * unreduced_mse
+                    unreduced_combined = self.loss_module(predictions, targets)
+                    _assert_finite_tensor(
+                        unreduced_combined,
+                        label="unreduced signed-log loss",
+                        mode=mode,
+                        batch_idx=batch_idx,
+                    )
 
                     valid_steps = ~target_masks
                     valid_step_mask = valid_steps.unsqueeze(-1)

@@ -279,16 +279,6 @@ class LossDispatchValidatorTests(unittest.TestCase):
         validate_config(cfg)
         self.assertEqual(cfg["loss"]["type"], "signed_log_adaptive")
 
-    def test_hybrid_fractional_config_validates(self) -> None:
-        cfg = self._base_cfg()
-        cfg["loss"] = {
-            "type": "hybrid_fractional",
-            "lambda_mse": 0.5,
-            "lambda_frac": 0.5,
-            "fractional_epsilon": 1.0,
-        }
-        validate_config(cfg)
-
     def test_missing_loss_type_raises(self) -> None:
         cfg = self._base_cfg()
         del cfg["loss"]["type"]
@@ -301,23 +291,15 @@ class LossDispatchValidatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown loss.type"):
             validate_config(cfg)
 
-    def test_legacy_keys_under_new_type_raises(self) -> None:
-        cfg = self._base_cfg()
-        # Default config is signed_log_adaptive; sneak in a legacy key.
-        cfg["loss"]["lambda_mse"] = 0.5
-        with self.assertRaisesRegex(ValueError, "hybrid_fractional keys"):
-            validate_config(cfg)
-
-    def test_new_keys_under_legacy_type_raises(self) -> None:
+    def test_legacy_hybrid_fractional_now_rejected(self) -> None:
         cfg = self._base_cfg()
         cfg["loss"] = {
             "type": "hybrid_fractional",
             "lambda_mse": 0.5,
             "lambda_frac": 0.5,
             "fractional_epsilon": 1.0,
-            "lambda_z": 0.5,  # stray new-loss key
         }
-        with self.assertRaisesRegex(ValueError, "signed_log_adaptive keys"):
+        with self.assertRaisesRegex(ValueError, "Unknown loss.type"):
             validate_config(cfg)
 
 

@@ -157,7 +157,6 @@
     //     where signed_log10(x) = sign(x) * log10(|x| + 1) (sign-preserving,
     //     well-defined at zero, no divisive amplification near flux
     //     zero-crossings).
-    //   "hybrid_fractional" -> legacy 0.5*MSE(z) + 0.5*(p-t)^2/(t^2+eps).
     "type": "signed_log_adaptive",
     "lambda_z": 0.5,
     "lambda_phys": 0.5,

@@ -1,18 +1,19 @@
 #!/bin/bash
-#SBATCH -J rt_tune
-#SBATCH -o rt_tune.o%j
-#SBATCH -e rt_tune.e%j
-#SBATCH -p gpu
-#SBATCH --mem=60G
-#SBATCH -t 3-00:00:00
-#SBATCH --gpus=1
-#SBATCH --clusters=edge
-#SBATCH -N 1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mail-type=all
-#SBATCH --mail-user=isaac.n.malsky@jpl.nasa.gov
+#PBS -N rt_tune
+#PBS -j oe
+#PBS -o rt_tune.o${PBS_JOBID}
+#PBS -q gpu
+#PBS -l select=1:ncpus=8:mem=60gb:ngpus=1
+#PBS -l walltime=72:00:00
+#PBS -m abe
+#PBS -M isaac.n.malsky@jpl.nasa.gov
 
+# PBS variant of supercomputer_cmds/tune.sh. Mirrors the SLURM script's defaults
+# and pre-flight checks so the two launchers stay in lockstep. Pick the one
+# that matches your cluster's scheduler:
+#   sbatch Problemulator/supercomputer_cmds/tune.sh    # SLURM
+#   qsub   Problemulator/supercomputer_cmds/tune.pbs   # PBS Pro / Torque
+#
 # Drive the Optuna hyperparameter search defined in src/tune.py.
 # Default layout: MODEL_FAMILY=sequential with N_TRIALS=32 -> 16 LSTM trials
 # (trials 0-15), followed by 16 transformer trials (trials 16-31). Both phases
@@ -27,36 +28,27 @@
 #
 # Pre-requisite: at least one successful train.sh run, so that
 # data/raw/$TRAIN_RAW_NAME exists AND data/processed/ has a current fingerprint.
-# tune.sh will not merge shards itself, and will hard-fail if the processed
+# tune.pbs will not merge shards itself, and will hard-fail if the processed
 # cache is missing or stale (rebuild_processed_data is forced false to avoid
-# clobbering a parallel train.sh). If you don't have a current cache yet, run
-# normalize.sh first (CPU-only, ~minutes).
-#
-# Side-by-side with train.sh:
-#     # 1. Bootstrap data/processed/ if needed (skip if already current):
-#     sbatch Problemulator/supercomputer_cmds/normalize.sh
-#     # 2. Submit both jobs in parallel:
-#     sbatch Problemulator/supercomputer_cmds/train.sh    # baseline transformer
-#     sbatch Problemulator/supercomputer_cmds/tune.sh     # 16 LSTM + 16 transformer
-#     # tune.sh writes to models/tune_<study>/; train.sh writes to
-#     # models/transformer_main/. Both read data/processed/ read-only.
+# clobbering a parallel train run). If you don't have a current cache yet, run
+# normalize first (CPU-only, ~minutes).
 #
 # Submit:
-#     sbatch Problemulator/supercomputer_cmds/tune.sh
+#     qsub Problemulator/supercomputer_cmds/tune.pbs
 #     # or, from Problemulator/:
-#     sbatch supercomputer_cmds/tune.sh
+#     qsub supercomputer_cmds/tune.pbs
 #
 # Resume after preemption / time limit (re-uses SQLite study by name):
-#     STUDY_NAME=<existing_name> sbatch Problemulator/supercomputer_cmds/tune.sh
+#     qsub -v STUDY_NAME=<existing_name> Problemulator/supercomputer_cmds/tune.pbs
 #
-# Optional overrides:
-#     STUDY_NAME=rt_tune_2026 sbatch Problemulator/supercomputer_cmds/tune.sh
-#     N_TRIALS=500 TIMEOUT_SECONDS=86400 sbatch Problemulator/supercomputer_cmds/tune.sh
-#     EPOCHS=100 PATIENCE=15 DATA_FRACTION=1.0 sbatch Problemulator/supercomputer_cmds/tune.sh
-#     BASE_CONFIG=config/transformer_v2.jsonc sbatch Problemulator/supercomputer_cmds/tune.sh   # base config (architecture-agnostic for sequential/both)
-#     MODEL_FAMILY=both sbatch Problemulator/supercomputer_cmds/tune.sh                          # alternate transformer/LSTM trials by trial number
-#     MODEL_FAMILY=lstm sbatch Problemulator/supercomputer_cmds/tune.sh                          # single-architecture sweep
-#     N_TRIALS_LSTM=16 N_TRIALS=48 MODEL_FAMILY=sequential sbatch ...                            # asymmetric split (16 LSTM + 32 transformer)
+# Optional overrides (PBS passes env through -v):
+#     qsub -v STUDY_NAME=rt_tune_2026 Problemulator/supercomputer_cmds/tune.pbs
+#     qsub -v N_TRIALS=64,TIMEOUT_SECONDS=86400 Problemulator/supercomputer_cmds/tune.pbs
+#     qsub -v EPOCHS=80,PATIENCE=15,DATA_FRACTION=0.3 Problemulator/supercomputer_cmds/tune.pbs
+#     qsub -v BASE_CONFIG=config/transformer_v2.jsonc Problemulator/supercomputer_cmds/tune.pbs
+#     qsub -v MODEL_FAMILY=both Problemulator/supercomputer_cmds/tune.pbs
+#     qsub -v MODEL_FAMILY=lstm Problemulator/supercomputer_cmds/tune.pbs
+#     qsub -v N_TRIALS_LSTM=12,N_TRIALS=32,MODEL_FAMILY=sequential Problemulator/supercomputer_cmds/tune.pbs
 
 set -euo pipefail
 
@@ -89,10 +81,9 @@ resolve_problemulator_path() {
     fi
 }
 
-# SLURM copies the script to its spool dir before executing, so BASH_SOURCE[0]
-# points to the spool path, not the repo. Use SLURM_SUBMIT_DIR when available.
-if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
-    PROBLEMULATOR_ROOT="$(resolve_problemulator_root "$SLURM_SUBMIT_DIR")"
+# PBS sets PBS_O_WORKDIR to the directory from which qsub was invoked.
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+    PROBLEMULATOR_ROOT="$(resolve_problemulator_root "$PBS_O_WORKDIR")"
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     PROBLEMULATOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -105,29 +96,14 @@ TRAIN_RAW_NAME="${TRAIN_RAW_NAME:-$MERGED_NAME}"
 BASE_CONFIG="${BASE_CONFIG:-config/lstm_v2.jsonc}"
 MODEL_FAMILY="${MODEL_FAMILY:-sequential}"
 STUDY_NAME="${STUDY_NAME:-rt_tune_$(date +%Y%m%d_%H%M%S)}"
-# Defaults tuned for a "good comparison" sweep that fits in ~72h SLURM
-# walltime. With MODEL_FAMILY=sequential, 32 trials = 16 LSTM (trials 0-15)
-# followed by 16 transformer (trials 16-31). Override N_TRIALS_LSTM to change
-# the split. Estimated budget (post search-space expansion in src/tune.py):
-#   ~22.7 min/trial at the prior 30-epoch/10%-data config × 2 (epochs)
-#                                                       × 2 (data)
-#                                                       × ~1.3 (wider space)
-#     = ~118 min/trial avg => 32 * 1.97h = ~63h. Fits 69h timeout with margin.
+# Defaults match tune.sh -- see that file for the budget rationale. ~63h
+# expected wall-clock; TIMEOUT_SECONDS clamps to ~69h so the leaderboard
+# flush completes before PBS hard-kills the job at the 72h walltime.
 N_TRIALS="${N_TRIALS:-32}"
 N_TRIALS_LSTM="${N_TRIALS_LSTM:-}"
-# ~69h leaves a 3h margin under the 72h walltime so the leaderboard flush
-# can complete before SLURM hard-kills the job.
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-248400}"
-# 60 epochs lets both architectures escape the early-plateau region that the
-# 30-epoch budget revealed in tune_rt_tune_20260510_104818 (transformer
-# trial 63 plateaued by epoch 25; LSTM trial 20 was still descending at
-# epoch 30 because cosine LR had already collapsed to 1e-8).
 EPOCHS="${EPOCHS:-60}"
-# 20% of the training set (~1M profiles) gives noticeably less per-epoch
-# noise than 10% without quadrupling per-epoch cost.
 DATA_FRACTION="${DATA_FRACTION:-0.2}"
-# Patience scales with the longer epoch budget so well-converged trials can
-# early-stop without being cut short by interim noise.
 PATIENCE="${PATIENCE:-12}"
 
 # Mitigate fragmentation when many trials cycle the GPU allocator.
@@ -167,7 +143,7 @@ if ! grep -q "\"$TRAIN_RAW_NAME\"" "$BASE_CONFIG_PATH"; then
 fi
 if [[ ! -f "$PROBLEMULATOR_ROOT/data/raw/$TRAIN_RAW_NAME" ]]; then
     echo "Raw HDF5 missing: $PROBLEMULATOR_ROOT/data/raw/$TRAIN_RAW_NAME" >&2
-    echo "Run 'sbatch Problemulator/supercomputer_cmds/train.sh' once to merge shards and stage the raw file." >&2
+    echo "Run the training launcher once to merge shards and stage the raw file." >&2
     exit 1
 fi
 

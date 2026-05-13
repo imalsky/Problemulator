@@ -31,9 +31,9 @@
 #     REBUILD_PROCESSED=1 is set explicitly.
 #
 # By default this trains the tuned transformer (transformer_main.jsonc), whose
-# architecture comes from the best trial of tune_rt_tune_20260508_160639. This
-# is the "best guess" transformer baseline — submit alongside tune.sh to
-# get a current best while the search runs.
+# architecture matches the best transformer trial from the current sweep at
+# tune_rt_tune_20260510_104818/. Submit alongside tune.sh to refresh the
+# baseline while the next search runs.
 # Models in CONFIG_NAMES train sequentially in the listed order, sharing the
 # processed data cache.
 #

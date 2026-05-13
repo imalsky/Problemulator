@@ -90,9 +90,10 @@
   },
   "model_hyperparameters": {
     // Available model types: "transformer", "lstm"
-    // Hyperparameters below match trial 19 of the 60-trial sweep at
-    // models/tune_rt_tune_20260505_114151/ (best-of-30 LSTM trials,
-    // val_loss 3.819e-4, 14,460,418 trainable parameters).
+    // Baseline LSTM configuration used for the architecture-comparison sweeps.
+    // The current sweep best (tune_rt_tune_20260510_104818/trial_0020) further
+    // tightens dropout=0 and film_clamp=5.0; this file deliberately keeps the
+    // less-aggressive defaults for the v2 baseline.
     "model_type": "lstm",
     "d_model": 512,
     "dropout": 0.05,
@@ -152,19 +153,17 @@
     //     where signed_log10(x) = sign(x) * log10(|x| + 1) (sign-preserving,
     //     well-defined at zero, no divisive amplification near flux
     //     zero-crossings).
+    // Pure MSE in normalized space (lambda_phys=0 drops the phys-space term);
+    // see Problemulator/config/transformer_main.jsonc for the rationale.
     "type": "signed_log_adaptive",
-    "lambda_z": 0.5,
-    "lambda_phys": 0.5,
-    // Per-channel weighting:
-    //   "uniform" -> w_c = 1.
-    //   "range"   -> w_c = std_c^weight_power, normalized so mean(w)=1,
-    //                clamped to [w_min, w_max], then renormalized so the
-    //                phys-term magnitude does not depend on the weight bounds.
-    "weight_mode": "range",
-    "weight_power": 0.5,
-    "w_min": 0.5,
-    "w_max": 2.0,
-    // p_norm: 1 -> MAE in signed-log space (Huber-like); 2 -> MSE.
+    "lambda_z": 1.0,
+    "lambda_phys": 0.0,
+    // weight_mode/weight_power/w_min/w_max/p_norm are required by the schema
+    // but unused while lambda_phys == 0.
+    "weight_mode": "uniform",
+    "weight_power": 0.0,
+    "w_min": 1.0,
+    "w_max": 1.0,
     "p_norm": 1
   },
   "output_paths_config": {

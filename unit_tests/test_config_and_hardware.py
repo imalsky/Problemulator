@@ -72,7 +72,8 @@ class ConfigAndHardwareTests(unittest.TestCase):
         # Updated for QK-Norm + SwiGLU FFN defaults: explicit Q/K/V/out
         # projections, per-head Q/K LayerNorms, and a 3-matrix gated FFN.
         # lstm_v2 uses d_model=512, num_layers=3, bidirectional=True
-        # (matches the previous-sweep best LSTM, trial 19).
+        # (matches the LSTM architecture selected by the signed_log_adaptive
+        # sweep at tune_rt_tune_20260510_104818/, best LSTM trial 20).
         self.assertEqual(transformer_params, 4252802)
         self.assertEqual(lstm_params, 14460418)
 

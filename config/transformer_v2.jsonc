@@ -157,19 +157,17 @@
     //     where signed_log10(x) = sign(x) * log10(|x| + 1) (sign-preserving,
     //     well-defined at zero, no divisive amplification near flux
     //     zero-crossings).
+    // Pure MSE in normalized space (lambda_phys=0 drops the phys-space term);
+    // see Problemulator/config/transformer_main.jsonc for the rationale.
     "type": "signed_log_adaptive",
-    "lambda_z": 0.5,
-    "lambda_phys": 0.5,
-    // Per-channel weighting:
-    //   "uniform" -> w_c = 1.
-    //   "range"   -> w_c = std_c^weight_power, normalized so mean(w)=1,
-    //                clamped to [w_min, w_max], then renormalized so the
-    //                phys-term magnitude does not depend on the weight bounds.
-    "weight_mode": "range",
-    "weight_power": 0.5,
-    "w_min": 0.5,
-    "w_max": 2.0,
-    // p_norm: 1 -> MAE in signed-log space (Huber-like); 2 -> MSE.
+    "lambda_z": 1.0,
+    "lambda_phys": 0.0,
+    // weight_mode/weight_power/w_min/w_max/p_norm are required by the schema
+    // but unused while lambda_phys == 0.
+    "weight_mode": "uniform",
+    "weight_power": 0.0,
+    "w_min": 1.0,
+    "w_max": 1.0,
     "p_norm": 1
   },
   "output_paths_config": {

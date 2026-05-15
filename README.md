@@ -20,7 +20,7 @@ engineering polish are secondary.
 | Directory | Description |
 |-----------|-------------|
 | `src/` | Core pipeline: preprocessing, dataset, model definition, training loop, and the `main.py` entrypoint. |
-| `config/` | JSONC runtime configs for the transformer sweep baseline (`transformer_v2.jsonc`) and LSTM sweep baseline (`lstm_v2.jsonc`). |
+| `config/` | JSONC runtime configs: `transformer_main_v3.jsonc` (winning transformer from `tune_rt_tune_20260512_181651`, ~26.4M params) and `lstm_main_v3.jsonc` (best LSTM scaled up to ~23.9M params for parity). |
 | `unit_tests/` | Automated tests covering config validation, dataset/model behavior, and training-loop semantics. |
 | `testing/` | Post-training utilities: `export.py` (standalone `.pt2`), `errors.py` (test-set evaluation), `plot_example.py`, `training_progression.py`. |
 | [`docs/`](docs/) | [`spec.md`](docs/spec.md) — authoritative implementation specification. |
@@ -63,10 +63,10 @@ conda activate nn
 python src/main.py
 
 # Train with the LSTM baseline.
-python src/main.py --config config/lstm_v2.jsonc
+python src/main.py --config config/lstm_main_v3.jsonc
 
 # Preprocess only (set execution_mode = "normalize" in the config first).
-python src/main.py --config config/transformer_v2.jsonc
+python src/main.py --config config/transformer_main_v3.jsonc
 ```
 
 ### Post-training evaluation
@@ -96,8 +96,8 @@ sbatch Problemulator/supercomputer_cmds/gen.sh
 # 2. Merge shards, stage data, and train (run after gen.sh finishes).
 sbatch Problemulator/supercomputer_cmds/train.sh
 
-# Train a single config.
-CONFIG_NAMES="transformer_v2" sbatch Problemulator/supercomputer_cmds/train.sh
+# Train a single config (default is both transformer + lstm sequentially).
+CONFIG_NAMES="transformer_main_v3" sbatch Problemulator/supercomputer_cmds/train.sh
 
 # Force a full preprocessing cache rebuild.
 REBUILD_PROCESSED=1 sbatch Problemulator/supercomputer_cmds/train.sh

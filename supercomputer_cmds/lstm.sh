@@ -39,5 +39,5 @@ else
 fi
 cd "$PROBLEMULATOR_ROOT"
 
-export CONFIG_NAMES="lstm_v2"
+export CONFIG_NAMES="lstm_main_v3"
 exec bash "$PROBLEMULATOR_ROOT/supercomputer_cmds/train.sh"

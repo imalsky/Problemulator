@@ -29,7 +29,7 @@
 #     sbatch supercomputer_cmds/normalize.sh
 #
 # Optional overrides:
-#     BASE_CONFIG=config/lstm_v2.jsonc sbatch Problemulator/supercomputer_cmds/normalize.sh
+#     BASE_CONFIG=config/lstm_main_v3.jsonc sbatch Problemulator/supercomputer_cmds/normalize.sh
 #     TRAIN_RAW_NAME=picaso_results_5M.h5 sbatch Problemulator/supercomputer_cmds/normalize.sh
 #
 # Pre-requisite: Problemulator/data/raw/$TRAIN_RAW_NAME exists. Run train.sh
@@ -75,7 +75,7 @@ fi
 PROJECT_ROOT="$(cd "$PROBLEMULATOR_ROOT/.." && pwd)"
 cd "$PROBLEMULATOR_ROOT"
 CONDA_ENV="${CONDA_ENV:-nn}"
-BASE_CONFIG="${BASE_CONFIG:-config/transformer_v2.jsonc}"
+BASE_CONFIG="${BASE_CONFIG:-config/transformer_main_v3.jsonc}"
 MERGED_NAME="${MERGED_NAME:-picaso_results_5M.h5}"
 TRAIN_RAW_NAME="${TRAIN_RAW_NAME:-$MERGED_NAME}"
 

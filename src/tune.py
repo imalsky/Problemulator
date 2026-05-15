@@ -646,7 +646,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--base-config",
         type=Path,
-        default=PROJECT_ROOT / "config" / "transformer_v2.jsonc",
+        default=PROJECT_ROOT / "config" / "transformer_main_v3.jsonc",
         help="Base config file. Optimizer-scale settings are kept from this file.",
     )
     parser.add_argument(

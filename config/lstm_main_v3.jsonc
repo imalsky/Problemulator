@@ -1,20 +1,27 @@
 {
+  // Production config for the LSTM baseline alongside transformer_main_v3.
+  // Built from the winning LSTM trial of tune_rt_tune_20260512_181651
+  // (trial 2: d_model=512, num_layers=2, dropout=0, film_clamp=10,
+  // output_head_divisor=1, output_head_dropout_factor=0.25, signed-log flux norm;
+  // 9.73M params, val_loss=2.163e-3) — scaled up to num_layers=5 so the LSTM
+  // has roughly the same parameter budget (~23.9M) as transformer_main_v3
+  // (26.4M). Per-layer cost for bidirectional d_model=512 is ~4.73M (empirical
+  // from the sweep), so num_layers in {2,3,4,5,6} -> {9.7, 14.5, 19.2, 23.9, 28.6}M.
+  // Five layers is the closest match without going over the transformer's count.
+  //
+  // Training schedule and loss are identical to transformer_main_v3 for an
+  // apples-to-apples comparison.
   "miscellaneous_settings": {
     "random_seed": 42,
     "num_workers": 1,
     "detect_anomaly": false,
     "shard_size": 10000,
     "hdf5_read_chunk_size": 8192,
-    // Available backends: "cuda", "mps", "cpu"
     "device_backend": "cuda",
     "torch_compile": false,
-    // Available compile modes: "default", "reduce-overhead",
-    // "max-autotune", "max-autotune-no-cudagraphs"
     "compile_mode": "default",
-    // Available modes: "normalize", "train"
     "execution_mode": "train",
     "rebuild_processed_data": false,
-    // Available dataset loading modes: "auto", "ram", "disk"
     "dataset_loading_mode": "auto",
     "dataset_max_cached_shards": 200,
     "dataset_large_shard_mmap_bytes": 52428800,
@@ -89,30 +96,26 @@
     "float32_matmul_precision": "high"
   },
   "model_hyperparameters": {
-    // Available model types: "transformer", "lstm"
-    "model_type": "transformer",
-    "d_model": 256,
-    "dropout": 0.1,
-    "film_clamp": 1000.0,
+    "model_type": "lstm",
+    "d_model": 512,
+    "dropout": 0.0,
+    "film_clamp": 10.0,
     "max_sequence_length": 75,
-    "output_head_divisor": 2,
-    "output_head_dropout_factor": 0.5,
+    "output_head_divisor": 1,
+    "output_head_dropout_factor": 0.25,
+    // Transformer block is unused for model_type=lstm but required by the
+    // schema; values are placeholders.
     "transformer": {
       "nhead": 4,
       "num_layers": 4,
       "dim_feedforward": 1024,
-      "attention_dropout": 0.1,
-      // QK-Norm (Henry et al. 2020): per-head LayerNorm on Q and K before SDPA.
+      "attention_dropout": 0.0,
       "use_qk_norm": true,
-      // Bias on Q/K/V/out projections; modern practice keeps these on for
-      // small models. Set false to drop them.
       "qkv_bias": true,
-      // FFN variant: "gelu" = Linear-GELU-Linear (original),
-      // "swiglu" = LLaMA/PaLM-style gated FFN.
-      "ffn_type": "swiglu"
+      "ffn_type": "gelu"
     },
     "lstm": {
-      "num_layers": 3,
+      "num_layers": 5,
       "bidirectional": true
     }
   },
@@ -122,48 +125,28 @@
     "learning_rate": 0.0001,
     "weight_decay": 0.05,
     "optimizer": "adamw",
-    // AdamW betas: (0.9, 0.95) is the GPT-3/LLaMA/PaLM convention for
-    // transformers and adapts faster than the PyTorch default (0.9, 0.999).
     "adam_beta1": 0.9,
     "adam_beta2": 0.95,
     "gradient_clip_val": 2.0,
-    // Available schedulers: "cosine", "plateau"
     "scheduler_type": "cosine",
     "min_lr": 1e-08,
     "warmup_epochs": 10,
     "warmup_start_factor": 0.1,
-    // Warmup granularity: "epoch" (legacy, one LR step per epoch) or "step"
-    // (per optimizer step — smoother, modern default).
     "warmup_unit": "step",
     "plateau_patience": 10,
     "plateau_factor": 0.5,
     "plateau_threshold": 1e-05,
-    // Available threshold modes: "abs", "rel"
     "plateau_threshold_mode": "abs",
     "early_stopping_patience": 30,
     "min_delta": 1e-05,
     "use_amp": true,
-    // Polyak averaging (EMA) of model weights. ``0`` disables; ``0.999`` is
-    // the canonical default for vision/regression checkpoints.
     "ema_decay": 0.999,
     "dataset_fraction_to_use": 1.0
   },
   "loss": {
-    // Loss selector. Allowed:
-    //   "signed_log_adaptive" -> per-channel-weighted signed-log loss + MSE(z):
-    //       L = lambda_z * masked_mean((pred_z - true_z)^2)
-    //         + lambda_phys * sum_c w_c
-    //                       * |signed_log10(p_phys_c) - signed_log10(t_phys_c)|^p_norm
-    //     where signed_log10(x) = sign(x) * log10(|x| + 1) (sign-preserving,
-    //     well-defined at zero, no divisive amplification near flux
-    //     zero-crossings).
-    // Pure MSE in normalized space (lambda_phys=0 drops the phys-space term);
-    // see Problemulator/config/transformer_main.jsonc for the rationale.
     "type": "signed_log_adaptive",
     "lambda_z": 1.0,
     "lambda_phys": 0.0,
-    // weight_mode/weight_power/w_min/w_max/p_norm are required by the schema
-    // but unused while lambda_phys == 0.
     "weight_mode": "uniform",
     "weight_power": 0.0,
     "w_min": 1.0,
@@ -171,6 +154,6 @@
     "p_norm": 1
   },
   "output_paths_config": {
-    "fixed_model_foldername": "transformer_v2"
+    "fixed_model_foldername": "lstm_main"
   }
 }

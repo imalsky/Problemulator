@@ -53,7 +53,7 @@
 #     STUDY_NAME=rt_tune_2026 sbatch Problemulator/supercomputer_cmds/tune.sh
 #     N_TRIALS=500 TIMEOUT_SECONDS=86400 sbatch Problemulator/supercomputer_cmds/tune.sh
 #     EPOCHS=100 PATIENCE=15 DATA_FRACTION=1.0 sbatch Problemulator/supercomputer_cmds/tune.sh
-#     BASE_CONFIG=config/transformer_v2.jsonc sbatch Problemulator/supercomputer_cmds/tune.sh   # base config (architecture-agnostic for sequential/both)
+#     BASE_CONFIG=config/transformer_main_v3.jsonc sbatch Problemulator/supercomputer_cmds/tune.sh  # base config (architecture-agnostic for sequential/both)
 #     MODEL_FAMILY=both sbatch Problemulator/supercomputer_cmds/tune.sh                          # alternate transformer/LSTM trials by trial number
 #     MODEL_FAMILY=lstm sbatch Problemulator/supercomputer_cmds/tune.sh                          # single-architecture sweep
 #     N_TRIALS_LSTM=16 N_TRIALS=48 MODEL_FAMILY=sequential sbatch ...                            # asymmetric split (16 LSTM + 32 transformer)
@@ -102,7 +102,7 @@ cd "$PROBLEMULATOR_ROOT"
 CONDA_ENV="${CONDA_ENV:-nn}"
 MERGED_NAME="${MERGED_NAME:-picaso_results_5M.h5}"
 TRAIN_RAW_NAME="${TRAIN_RAW_NAME:-$MERGED_NAME}"
-BASE_CONFIG="${BASE_CONFIG:-config/lstm_v2.jsonc}"
+BASE_CONFIG="${BASE_CONFIG:-config/lstm_main_v3.jsonc}"
 MODEL_FAMILY="${MODEL_FAMILY:-sequential}"
 STUDY_NAME="${STUDY_NAME:-rt_tune_$(date +%Y%m%d_%H%M%S)}"
 # Defaults tuned for a "good comparison" sweep that fits in ~72h SLURM

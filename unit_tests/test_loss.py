@@ -271,7 +271,7 @@ class LossDispatchValidatorTests(unittest.TestCase):
 
     @staticmethod
     def _base_cfg() -> Dict[str, Any]:
-        return load_config(PROJECT_ROOT / "config" / "transformer_v2.jsonc")
+        return load_config(PROJECT_ROOT / "config" / "transformer_main_v3.jsonc")
 
     def test_default_signed_log_adaptive_config_validates(self) -> None:
         cfg = self._base_cfg()

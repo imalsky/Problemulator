@@ -1,4 +1,17 @@
 {
+  // Production config for the next full transformer_main training run.
+  // Architecture taken from the winning trial of the second sweep
+  // (tune_rt_tune_20260512_181651/trial_0020): d_model=512, num_layers=5,
+  // ffn_mult=8 -> dim_feedforward=4096, attention_dropout=0, output_head_divisor=2,
+  // film_clamp=50, dropout=0. Resulting parameter count: 26,408,194 trainable.
+  //
+  // Training schedule (epochs, early-stop patience, warmup, dataset_fraction)
+  // is the production schedule, NOT the trial's quick-sweep budget (60 epochs,
+  // patience=12, 20% data).
+  //
+  // Normalization matches the trial (signed-log on the flux channels) so the
+  // sweep ranking is comparable to the production run. The loss is pure z-MSE
+  // (signed_log_adaptive with lambda_phys=0).
   "miscellaneous_settings": {
     "random_seed": 42,
     "num_workers": 1,
@@ -63,6 +76,8 @@
       "pressure_bar": "log-min-max",
       "temperature_k": "standard",
       "orbital_distance_m": "log-standard",
+      // signed-log on the flux channels: matches tune_rt_tune_20260512_181651
+      // so production-run loss numbers are directly comparable to the sweep.
       "net_thermal_flux": "signed-log",
       "net_reflected_flux": "signed-log"
     },
@@ -89,26 +104,23 @@
     "float32_matmul_precision": "high"
   },
   "model_hyperparameters": {
-    // Available model types: "transformer", "lstm"
-    // Hyperparameters match the architecture selected by the
-    // signed_log_adaptive sweep at tune_rt_tune_20260510_104818/. Best
-    // transformer trial in that sweep (trial 63) hit num_layers=5 and
-    // dim_feedforward=2048 at the search-space ceiling; this file pins
-    // those values plus a small attention_dropout=0.025 as the deployment
-    // architecture (transformer_main, 16,044,034 trainable parameters,
-    // held-out test_loss=9.62e-3).
+    // Best transformer trial in tune_rt_tune_20260512_181651 was trial 20:
+    //   d_model=512, num_layers=5, ffn_mult=8 (dim_feedforward=4096),
+    //   dropout=0, attention_dropout=0, output_head_divisor=2,
+    //   output_head_dropout_factor=0, film_clamp=50
+    // 26,408,194 trainable params; sweep val_loss = 2.098e-3.
     "model_type": "transformer",
     "d_model": 512,
     "dropout": 0.0,
     "film_clamp": 50.0,
     "max_sequence_length": 75,
-    "output_head_divisor": 1,
+    "output_head_divisor": 2,
     "output_head_dropout_factor": 0.0,
     "transformer": {
       "nhead": 4,
       "num_layers": 5,
-      "dim_feedforward": 2048,
-      "attention_dropout": 0.025,
+      "dim_feedforward": 4096,
+      "attention_dropout": 0.0,
       // QK-Norm (Henry et al. 2020): per-head LayerNorm on Q and K before SDPA.
       "use_qk_norm": true,
       // Bias on Q/K/V/out projections; modern practice keeps these on for
@@ -156,14 +168,10 @@
     "dataset_fraction_to_use": 1.0
   },
   "loss": {
-    // Pure MSE in normalized space. Equivalent to the pre-revision objective:
+    // Pure MSE in normalized space (matches tune_rt_tune_20260512_181651).
     //       L = masked_mean((pred_z - true_z)^2)
     // Implemented inside signed_log_adaptive by setting lambda_phys=0 so the
-    // phys-space term is dropped entirely. The lambda_phys L1-style phys term
-    // (Huber-like in signed-log space) tended to leave 1--3-decade
-    // under-prediction tails on cold, deep, low-flux states because its
-    // gradient floor `0.5*std*sign(Delta)` prevented the model from driving
-    // small-|Delta| residuals to zero. Pure MSE has no such floor.
+    // phys-space term is dropped entirely.
     "type": "signed_log_adaptive",
     "lambda_z": 1.0,
     "lambda_phys": 0.0,

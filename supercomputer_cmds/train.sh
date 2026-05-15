@@ -30,10 +30,11 @@
 #     (see rebuild_processed_data in the selected config). It is only wiped if
 #     REBUILD_PROCESSED=1 is set explicitly.
 #
-# By default this trains the tuned transformer (transformer_main.jsonc), whose
-# architecture matches the best transformer trial from the current sweep at
-# tune_rt_tune_20260510_104818/. Submit alongside tune.sh to refresh the
-# baseline while the next search runs.
+# By default this trains both production models in sequence:
+#   1. transformer_main_v3.jsonc — winning transformer (sweep trial 20, 26.4M params)
+#   2. lstm_main_v3.jsonc        — best LSTM scaled up to ~23.9M params for parity
+# Both use signed-log flux normalization and the same training schedule, so the
+# two trained checkpoints are directly comparable as paper baselines.
 # Models in CONFIG_NAMES train sequentially in the listed order, sharing the
 # processed data cache.
 #
@@ -53,8 +54,8 @@
 #     SKIP_MERGE=1 sbatch Problemulator/supercomputer_cmds/train.sh             # skip the merge step entirely
 #     SKIP_MERGE=0 sbatch Problemulator/supercomputer_cmds/train.sh             # always run the merge freshness check
 #     REBUILD_PROCESSED=1 sbatch Problemulator/supercomputer_cmds/train.sh      # force a full preprocessing rebuild
-#     CONFIG_NAMES="lstm_v2" sbatch Problemulator/supercomputer_cmds/train.sh                    # train lstm baseline only
-#     CONFIG_NAMES="transformer_v2 lstm_v2" sbatch Problemulator/supercomputer_cmds/train.sh     # both baselines, sequential
+#     CONFIG_NAMES="lstm_main_v3" sbatch Problemulator/supercomputer_cmds/train.sh                          # LSTM only
+#     CONFIG_NAMES="transformer_main_v3" sbatch Problemulator/supercomputer_cmds/train.sh                   # transformer only
 
 set -euo pipefail
 
@@ -92,8 +93,8 @@ REBUILD_PROCESSED="${REBUILD_PROCESSED:-0}"
 SKIP_MERGE="${SKIP_MERGE:-auto}"
 # Space-separated list of config stems under config/<name>.jsonc.
 # Models train sequentially in the listed order; the first one that fails
-# stops the job (set -e). Override with CONFIG_NAMES="lstm_v2 transformer_v2" etc.
-CONFIG_NAMES="${CONFIG_NAMES:-transformer_main}"
+# stops the job (set -e). Override with CONFIG_NAMES="lstm_main_v3" etc.
+CONFIG_NAMES="${CONFIG_NAMES:-transformer_main_v3 lstm_main_v3}"
 
 MERGED_PATH="$PROJECT_ROOT/gen_data/output/$MERGED_NAME"
 TRAIN_RAW_DIR="$PROBLEMULATOR_ROOT/data/raw"

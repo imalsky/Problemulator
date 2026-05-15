@@ -26,7 +26,7 @@ from model import create_prediction_model
 from utils import get_precision_config, load_config, load_splits, validate_config
 
 
-def _load_checked_in_config(config_name: str = "transformer_v2") -> dict:
+def _load_checked_in_config(config_name: str = "transformer_main_v3") -> dict:
     """Load one of the checked-in JSONC configs as plain JSON for test mutation."""
     config_path = PROJECT_ROOT / "config" / f"{config_name}.jsonc"
     return load_config(config_path)
@@ -38,7 +38,7 @@ class ConfigAndHardwareTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.base_config = _load_checked_in_config()
-        cls.lstm_config = _load_checked_in_config("lstm_v2")
+        cls.lstm_config = _load_checked_in_config("lstm_main_v3")
 
     def test_checked_in_config_validates(self) -> None:
         """The repository default config should pass strict validation."""
@@ -69,13 +69,13 @@ class ConfigAndHardwareTests(unittest.TestCase):
             parameter.numel() for parameter in lstm_model.parameters() if parameter.requires_grad
         )
 
-        # Updated for QK-Norm + SwiGLU FFN defaults: explicit Q/K/V/out
-        # projections, per-head Q/K LayerNorms, and a 3-matrix gated FFN.
-        # lstm_v2 uses d_model=512, num_layers=3, bidirectional=True
-        # (matches the LSTM architecture selected by the signed_log_adaptive
-        # sweep at tune_rt_tune_20260510_104818/, best LSTM trial 20).
-        self.assertEqual(transformer_params, 4252802)
-        self.assertEqual(lstm_params, 14460418)
+        # transformer_main_v3: d_model=512, num_layers=5, dim_feedforward=4096,
+        # output_head_divisor=2 (winning trial of tune_rt_tune_20260512_181651).
+        # lstm_main_v3: d_model=512, num_layers=5, bidirectional, scaled up from
+        # the best LSTM trial (#2, 2 layers, 9.7M) to put it in the same
+        # parameter regime as the transformer (~24M vs 26M).
+        self.assertEqual(transformer_params, 26408194)
+        self.assertEqual(lstm_params, 23921154)
 
     def test_validate_config_rejects_none_normalization(self) -> None:
         """Required variables may not use the removed 'none' normalization mode."""

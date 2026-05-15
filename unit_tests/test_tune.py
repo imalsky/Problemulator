@@ -132,7 +132,7 @@ class TuneControlFlowTests(unittest.TestCase):
             tune.TunerCallbackTrainer = original_trainer
 
     def _build_objective(self) -> tuple[Any, optuna.Study]:
-        base_config = load_config(PROJECT_ROOT / "config" / "transformer_v2.jsonc")
+        base_config = load_config(PROJECT_ROOT / "config" / "transformer_main_v3.jsonc")
         args = argparse.Namespace(
             epochs=2,
             data_fraction=0.1,

@@ -35,7 +35,7 @@ from utils import (
 # Default paths are anchored to project root (sibling of src/, config/, unit_tests/),
 # not the process working directory.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "transformer_v2.jsonc"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "transformer_main_v3.jsonc"
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_MODELS_DIR = PROJECT_ROOT / "models"
 PROCESSED_FINGERPRINT_FILENAME = "processed_fingerprint.json"

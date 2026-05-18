@@ -687,8 +687,9 @@ class ModelTrainer:
 
         ``signed_log_adaptive`` (only supported type):
             ``L = lambda_z * masked_mean((pred_z - true_z)^2)
-                + lambda_phys * sum_c w_c
-                              * |signed_log10(p_phys_c) - signed_log10(t_phys_c)|^p_norm``
+                + lambda_phys * masked_mean(
+                    |pred_phys - true_phys| / sqrt(true_phys^2 + fractional_epsilon)
+                  )``
 
             Implemented in :class:`loss.AdaptiveSignedLogLoss`. Stored as
             ``self.loss_module``; the trainer delegates the per-element loss
@@ -716,17 +717,12 @@ class ModelTrainer:
         ).to(self.device)
         logger.info(
             "signed_log_adaptive loss: lambda_z=%g lambda_phys=%g "
-            "weight_mode=%s weight_power=%g w_min=%g w_max=%g p_norm=%d; "
-            "per-target methods=%s; channel_weights=%s",
+            "fractional_epsilon=%g p_norm=%d; per-target methods=%s",
             self.loss_module.lambda_z,
             self.loss_module.lambda_phys,
-            self.loss_module.weight_mode,
-            self.loss_module.weight_power,
-            self.loss_module.w_min,
-            self.loss_module.w_max,
+            self.loss_module.fractional_epsilon,
             self.loss_module.p_norm,
             list(zip(target_vars, self._target_methods)),
-            self.loss_module.channel_weights.detach().cpu().tolist(),
         )
 
     def _load_per_target_norm_stats(self, context_label: str) -> List[str]:
@@ -811,14 +807,11 @@ class ModelTrainer:
         assert self.loss_module is not None
         return {
             "type": self.loss_type,
+            "physical_term": "fractional_l1",
             "lambda_z": self.loss_module.lambda_z,
             "lambda_phys": self.loss_module.lambda_phys,
-            "weight_mode": self.loss_module.weight_mode,
-            "weight_power": self.loss_module.weight_power,
-            "w_min": self.loss_module.w_min,
-            "w_max": self.loss_module.w_max,
+            "fractional_epsilon": self.loss_module.fractional_epsilon,
             "p_norm": self.loss_module.p_norm,
-            "channel_weights": self.loss_module.channel_weights.detach().cpu().tolist(),
             "target_methods": target_methods,
         }
     
@@ -1036,7 +1029,7 @@ class ModelTrainer:
                     unreduced_combined = self.loss_module(predictions, targets)
                     _assert_finite_tensor(
                         unreduced_combined,
-                        label="unreduced signed-log loss",
+                        label="unreduced fractional loss",
                         mode=mode,
                         batch_idx=batch_idx,
                     )

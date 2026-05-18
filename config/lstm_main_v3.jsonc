@@ -1,13 +1,21 @@
 {
-  // Production config for the LSTM baseline alongside transformer_main_v3.
+  // Production config for the LSTM baseline alongside transformer_main_v3,
+  // reverted to symlog flux normalization and paper-comparable regularization
+  // after the May-2026 signed-log run regressed on low-magnitude flux.
+  //
+  // Architecture: d_model=512, num_layers=2 (bidirectional), film_clamp=1000,
+  // dropout=0, output_head_divisor=1, output_head_dropout_factor=0.25.
   // Built from the winning LSTM trial of tune_rt_tune_20260512_181651
-  // (trial 2: d_model=512, num_layers=2, dropout=0, film_clamp=10,
-  // output_head_divisor=1, output_head_dropout_factor=0.25, signed-log flux norm;
-  // 9.73M params, val_loss=2.163e-3) — scaled up to num_layers=5 so the LSTM
-  // has roughly the same parameter budget (~23.9M) as transformer_main_v3
-  // (26.4M). Per-layer cost for bidirectional d_model=512 is ~4.73M (empirical
-  // from the sweep), so num_layers in {2,3,4,5,6} -> {9.7, 14.5, 19.2, 23.9, 28.6}M.
-  // Five layers is the closest match without going over the transformer's count.
+  // (trial 2: 9.73M params, val_loss=2.163e-3 under signed-log). Per-layer
+  // cost for bidirectional d_model=512 is ~4.73M, so num_layers=2 -> ~9.7M,
+  // comparable to transformer_main_v3's ~10.7M for the ~10M cap.
+  //
+  // Reverts from the prior signed-log run (was 23.9M, num_layers=5):
+  //   - net_thermal_flux / net_reflected_flux normalization: signed-log -> symlog
+  //   - film_clamp: 10.0 -> 1000.0 (paper value)
+  //   - weight_decay: 0.05 -> 1e-5 (paper value)
+  //   - early_stopping_patience: 30 -> 100 (paper used 99999)
+  //   - num_layers: 5 -> 2 (capacity match with ~10M transformer)
   //
   // Training schedule and loss are identical to transformer_main_v3 for an
   // apples-to-apples comparison.
@@ -70,8 +78,8 @@
       "pressure_bar": "log-min-max",
       "temperature_k": "standard",
       "orbital_distance_m": "log-standard",
-      "net_thermal_flux": "signed-log",
-      "net_reflected_flux": "signed-log"
+      "net_thermal_flux": "symlog",
+      "net_reflected_flux": "symlog"
     },
     "epsilon": 1e-9,
     "padding_comparison_epsilon": 1e-6,
@@ -99,10 +107,13 @@
     "model_type": "lstm",
     "d_model": 512,
     "dropout": 0.0,
-    "film_clamp": 10.0,
+    "film_clamp": 1000.0,
     "max_sequence_length": 75,
     "output_head_divisor": 1,
     "output_head_dropout_factor": 0.25,
+    // Activation in the 2-linear output projection head. Tuned in the
+    // 64-trial sweep (gelu vs silu); paper default is "gelu".
+    "head_activation": "gelu",
     // Transformer block is unused for model_type=lstm but required by the
     // schema; values are placeholders.
     "transformer": {
@@ -115,7 +126,7 @@
       "ffn_type": "gelu"
     },
     "lstm": {
-      "num_layers": 5,
+      "num_layers": 2,
       "bidirectional": true
     }
   },
@@ -123,7 +134,7 @@
     "epochs": 300,
     "batch_size": 256,
     "learning_rate": 0.0001,
-    "weight_decay": 0.05,
+    "weight_decay": 1e-5,
     "optimizer": "adamw",
     "adam_beta1": 0.9,
     "adam_beta2": 0.95,
@@ -137,7 +148,7 @@
     "plateau_factor": 0.5,
     "plateau_threshold": 1e-05,
     "plateau_threshold_mode": "abs",
-    "early_stopping_patience": 30,
+    "early_stopping_patience": 100,
     "min_delta": 1e-05,
     "use_amp": true,
     "ema_decay": 0.999,
@@ -147,11 +158,12 @@
     "type": "signed_log_adaptive",
     "lambda_z": 1.0,
     "lambda_phys": 0.0,
+    "fractional_epsilon": 1.0,
+    "p_norm": 1,
     "weight_mode": "uniform",
     "weight_power": 0.0,
     "w_min": 1.0,
-    "w_max": 1.0,
-    "p_norm": 1
+    "w_max": 1.0
   },
   "output_paths_config": {
     "fixed_model_foldername": "lstm_main"

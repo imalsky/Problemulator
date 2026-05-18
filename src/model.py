@@ -29,6 +29,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+
+HEAD_ACTIVATIONS: Dict[str, type] = {
+    "gelu": nn.GELU,
+    "silu": nn.SiLU,
+    "relu": nn.ReLU,
+}
+
+
+def make_head_activation(name: str) -> nn.Module:
+    """Construct an activation module for the output-projection head."""
+    key = str(name).lower()
+    if key not in HEAD_ACTIVATIONS:
+        raise ValueError(
+            f"head_activation must be one of {sorted(HEAD_ACTIVATIONS)} (got {name!r})."
+        )
+    return HEAD_ACTIVATIONS[key]()
+
 from utils import get_precision_config, validate_config
 
 logger = logging.getLogger(__name__)
@@ -437,6 +454,7 @@ class PredictionModel(nn.Module):
             use_qk_norm: bool = False,
             qkv_bias: bool = True,
             ffn_type: str = "gelu",
+            head_activation: str = "gelu",
     ) -> None:
         """
         Initialize prediction model.
@@ -531,7 +549,7 @@ class PredictionModel(nn.Module):
         self.output_proj = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(d_model, intermediate_dim),
-            nn.GELU(),
+            make_head_activation(head_activation),
             nn.Dropout(dropout * output_head_dropout_factor),
             nn.Linear(intermediate_dim, output_dim),
         )
@@ -685,6 +703,7 @@ def create_prediction_model(
         "film_clamp": float(model_params["film_clamp"]),
         "output_head_divisor": int(model_params["output_head_divisor"]),
         "output_head_dropout_factor": float(model_params["output_head_dropout_factor"]),
+        "head_activation": str(model_params["head_activation"]).lower(),
     }
 
     if model_type == "transformer":

@@ -10,7 +10,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 
-from model import FiLMLayer
+from model import FiLMLayer, make_head_activation
 
 
 class LSTMBlock(nn.Module):
@@ -127,6 +127,7 @@ class LSTMPredictionModel(nn.Module):
         film_clamp: float,
         output_head_divisor: int,
         output_head_dropout_factor: float,
+        head_activation: str = "gelu",
     ) -> None:
         super().__init__()
 
@@ -182,7 +183,7 @@ class LSTMPredictionModel(nn.Module):
         self.output_proj = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(d_model, intermediate_dim),
-            nn.GELU(),
+            make_head_activation(head_activation),
             nn.Dropout(dropout * output_head_dropout_factor),
             nn.Linear(intermediate_dim, output_dim),
         )

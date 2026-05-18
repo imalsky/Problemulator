@@ -63,9 +63,6 @@ logger = logging.getLogger(__name__)
 # the earlier failure mode where many transformer trials were killed too early.
 PRUNE_WARMUP_EPOCHS = 10
 
-TPE_N_STARTUP_TRIALS = 12
-TPE_N_EI_CANDIDATES = 32
-
 LEADERBOARD_TOP_K = 5
 GC_CALLBACK_EVERY_N_TRIALS = 5
 
@@ -73,7 +70,6 @@ MODEL_SIDE_NONFINITE_LABELS = {
     "model predictions",
     "unreduced loss",
     "unreduced fractional loss",
-    "unreduced signed-log loss",
     "masked loss",
 }
 
@@ -85,70 +81,83 @@ SAMPLER_SEED_DEFAULT = 42
 N_TRIALS_DEFAULT = 64
 TIMEOUT_DEFAULT_SECONDS = 248_400  # ~69 h; timeout still acts as the real cap.
 
-# Hard cap on dim_feedforward = d_model * ffn_mult. Pairs that exceed this are
-# pruned with optuna.TrialPruned so TPE doesn't waste sampler budget on them.
-# Raised from 2048 to 4096 so d_model=512 * ffn_mult=8 (the prior loss-era
-# winner) is reachable again under the new signed_log_adaptive loss.
-DIM_FEEDFORWARD_MAX = 4096
-
 # -----------------------------------------------------------------------------
-# Compact search space.
+# Grid search space (32 cells per architecture = 64 cells total).
 # -----------------------------------------------------------------------------
 #
-# Search space is informed by the prior 60-trial sweep at
-# Problemulator/models/tune_rt_tune_20260505_114151/ (hybrid_fractional loss)
-# and the May-2026 64-trial sweep at tune_rt_tune_20260510_104818/
-# (signed_log_adaptive loss). In the latter, both best architectures hit the
-# num_layers ceiling (transformer at 5, LSTM at 3) and the transformer was
-# further constrained by DIM_FEEDFORWARD_MAX=2048 (excluded d_model=512 *
-# ffn_mult=8). This round raises those caps so the search can probe whether
-# more capacity actually helps under the new loss.
-# Knobs that the prior sweep settled (nhead=4, ffn_type=gelu, use_qk_norm=True,
-# bidirectional=True) remain fixed to save trial budget.
+# Each cell is the cartesian product of:
+#   - 2 dropout values (0.0, 0.05)
+#   - 2 activation functions
+#       transformer: ffn_type in {gelu, swiglu}
+#       lstm:        head_activation in {gelu, silu}
+#   - 8 model-size variants per architecture (see TRANSFORMER_SIZES / LSTM_SIZES)
+#
+# attention_dropout and film_clamp are intentionally NOT swept (user request).
+# Other arch-specific knobs (nhead, use_qk_norm, qkv_bias, bidirectional,
+# output_head_divisor, output_head_dropout_factor) are also fixed -- the goal
+# of this sweep is to compare model sizes / dropouts / activations directly,
+# not to re-tune every dial. Defaults below match the v3 base configs.
 
-# Shared architecture choices.
-# d_model=128 was consistently uncompetitive; removed.
-D_MODEL_CHOICES: Tuple[int, ...] = (256, 512)
-# Dropout=0 was the strongest value in the prior MSE-only search; the reviewer
-# questions whether that holds under regularization. Range extended to 0.1 so
-# the new search produces evidence for the response under the new hybrid loss.
-DROPOUT_CHOICES: Tuple[float, ...] = (0.0, 0.025, 0.05, 0.1)
-# output_head_divisor=4 never appeared in the prior top-5; dropped.
-OUTPUT_HEAD_DIVISOR_CHOICES: Tuple[int, ...] = (1, 2)
-# output_head_dropout_factor=0.5 was never competitive; removed.
-OUTPUT_HEAD_DROPOUT_FACTOR_CHOICES: Tuple[float, ...] = (0.0, 0.25)
-# film_clamp=2.0 was consistently the weakest value; removed.
-FILM_CLAMP_CHOICES: Tuple[float, ...] = (5.0, 10.0, 50.0)
+DROPOUT_CHOICES: Tuple[float, ...] = (0.0, 0.05)
+TRANSFORMER_FFN_TYPE_CHOICES: Tuple[str, ...] = ("gelu", "swiglu")
+LSTM_HEAD_ACTIVATION_CHOICES: Tuple[str, ...] = ("gelu", "silu")
 
-# Transformer-only choices.
-# ffn_type: swiglu mean was 33% worse than gelu; fixed to gelu.
-# use_qk_norm: False trials had best=2.73e-4 vs True best=2.14e-4; fixed to True.
-# nhead: every trial in the prior top-5 used nhead=4; fixed to 4 to save trials.
-TRANSFORMER_FFN_TYPE_FIXED: str = "gelu"
-TRANSFORMER_QK_NORM_FIXED: bool = True
-TRANSFORMER_NHEAD_FIXED: int = 4
-# num_layers=2 was consistently weak; the May-2026 sweep at signed_log_adaptive
-# also hit the {3,4,5} ceiling (best trial at num_layers=5), so this round
-# extends the range to {3,4,5,6,7} to test whether deeper transformers help.
-TRANSFORMER_LAYER_CHOICES: Tuple[int, ...] = (3, 4, 5, 6, 7)
-# ffn_mult=8 won under the old loss with d_model=512 -> dim_feedforward=4096.
-# DIM_FEEDFORWARD_MAX was raised back to 4096 above so (512, 8) is reachable
-# again under the new loss. Invalid (d_model, ffn_mult) pairs are pruned via
-# optuna.TrialPruned at sample time.
-TRANSFORMER_FFN_MULT_CHOICES: Tuple[int, ...] = (2, 4, 8)
-# attention_dropout: prior winners at 0.0; keep small nonzero range as
-# reviewer counter-evidence under the new loss. 0.1 was a clear outlier in the
-# prior sweep; replaced with 0.05 to keep the range tight.
-TRANSFORMER_ATTENTION_DROPOUT_CHOICES: Tuple[float, ...] = (0.0, 0.025, 0.05)
+# Eight transformer architectures spanning ~1.6M to ~9.6M trainable params
+# at ffn_type=gelu. SwiGLU swap inflates each cell by ~1.5x (the FFN cost
+# fraction), reaching up to ~12.8M -- accommodated by MAX_TRAINABLE_PARAMS=13M.
+# Each is (d_model, num_layers, dim_feedforward); attention_dropout=0,
+# output_head_divisor=2, output_head_dropout_factor=0.
+#                                                       GELU      SwiGLU
+TRANSFORMER_SIZES: Tuple[Dict[str, int], ...] = (
+    {"d_model": 256, "num_layers": 3, "dim_feedforward": 512},   #  1.62M  / 2.02M
+    {"d_model": 256, "num_layers": 4, "dim_feedforward": 1024},  #  3.20M  / 4.25M
+    {"d_model": 256, "num_layers": 5, "dim_feedforward": 1024},  #  3.99M  / 5.31M
+    {"d_model": 256, "num_layers": 7, "dim_feedforward": 1024},  #  5.57M  / 7.42M
+    {"d_model": 256, "num_layers": 7, "dim_feedforward": 2048},  #  9.25M  / 12.93M
+    {"d_model": 512, "num_layers": 3, "dim_feedforward": 1024},  #  6.45M  / 8.03M
+    {"d_model": 512, "num_layers": 4, "dim_feedforward": 1024},  #  8.56M  / 10.66M
+    {"d_model": 512, "num_layers": 3, "dim_feedforward": 2048},  #  9.60M  / 12.75M (= transformer_main_v3)
+)
 
-# LSTM-only choices.
-# bidirectional=False was 4–5× worse than True; fixed to True.
-# num_layers=1 was consistently weaker; removed.
-# The May-2026 signed_log_adaptive sweep's best LSTM hit num_layers=3 (the
-# prior ceiling) and val_loss was still descending at epoch 30, so the range
-# is extended to {2,3,4} this round.
-LSTM_BIDIRECTIONAL_FIXED: bool = True
-LSTM_LAYER_CHOICES: Tuple[int, ...] = (2, 3, 4)
+# Eight bidirectional LSTM architectures spanning ~0.61M to ~9.73M trainable
+# params. Each is (d_model, num_layers); output_head_divisor=1,
+# output_head_dropout_factor=0.25.
+LSTM_SIZES: Tuple[Dict[str, int], ...] = (
+    {"d_model": 128, "num_layers": 2},  # ~0.61M
+    {"d_model": 192, "num_layers": 2},  # ~1.38M
+    {"d_model": 256, "num_layers": 2},  # ~2.44M
+    {"d_model": 256, "num_layers": 4},  # ~4.81M
+    {"d_model": 320, "num_layers": 3},  # ~5.66M
+    {"d_model": 448, "num_layers": 2},  # ~7.45M
+    {"d_model": 384, "num_layers": 3},  # ~8.14M
+    {"d_model": 512, "num_layers": 2},  # ~9.73M (matches lstm_main_v3)
+)
+
+# Fixed knobs (NOT swept in this round). Values match the v3 base configs.
+FIXED_FILM_CLAMP: float = 1000.0
+FIXED_ATTENTION_DROPOUT: float = 0.0
+TRANSFORMER_FIXED_NHEAD: int = 4
+TRANSFORMER_FIXED_USE_QK_NORM: bool = True
+TRANSFORMER_FIXED_QKV_BIAS: bool = True
+TRANSFORMER_FIXED_OUTPUT_HEAD_DIVISOR: int = 2
+TRANSFORMER_FIXED_OUTPUT_HEAD_DROPOUT_FACTOR: float = 0.0
+TRANSFORMER_FIXED_HEAD_ACTIVATION: str = "gelu"
+LSTM_FIXED_BIDIRECTIONAL: bool = True
+LSTM_FIXED_OUTPUT_HEAD_DIVISOR: int = 1
+LSTM_FIXED_OUTPUT_HEAD_DROPOUT_FACTOR: float = 0.25
+LSTM_FIXED_FFN_TYPE: str = "gelu"  # placeholder; LSTM ignores ffn_type
+
+# Hard cap on trainable parameters. Headroom above the user-stated ~10M
+# target is left for transformer trials that pick ffn_type='swiglu', which has
+# ~1.5x more FFN params than GELU at the same dim_feedforward. The 8 sizes
+# below all fit under this cap with EITHER activation. The two main configs
+# (transformer_main_v3: 9.60M GELU; lstm_main_v3: 9.73M) sit at the upper end.
+MAX_TRAINABLE_PARAMS: int = 13_000_000
+
+# TPE knobs retained for legacy non-grid model_family modes (transformer, lstm,
+# both, sequential, config). The 'grid' mode uses GridSampler instead.
+TPE_N_STARTUP_TRIALS_LEGACY: int = 12
+TPE_N_EI_CANDIDATES_LEGACY: int = 32
 
 
 def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
@@ -209,24 +218,19 @@ def _choose_model_type(
     requested_family: str,
     n_trials_lstm: Optional[int] = None,
 ) -> str:
-    """Select model family without letting TPE abandon one branch.
+    """Select model family.
 
-    ``both`` alternates by trial number:
-    - even trials: transformer
-    - odd trials: LSTM
-
-    This makes early comparisons balanced and deterministic.
-
-    ``sequential`` runs LSTM trials first, then transformer trials:
-    - trial.number < n_trials_lstm  -> "lstm"
-    - trial.number >= n_trials_lstm -> "transformer"
-
-    The split index ``n_trials_lstm`` must be supplied by the caller
-    (typically ``args.n_trials // 2``).
+    ``grid`` samples model_type as part of the grid (used with GridSampler).
+    ``both`` alternates by trial number (even=transformer, odd=lstm).
+    ``sequential`` runs LSTM trials first (trial.number < n_trials_lstm),
+    then transformer trials.
+    ``transformer`` or ``lstm`` runs a single architecture.
     """
     family = str(requested_family).lower()
     if family == "config":
         raise ValueError("'config' model family must be resolved before sampling.")
+    if family == "grid":
+        return str(trial.suggest_categorical("model_type", ["lstm", "transformer"]))
     if family == "both":
         return "transformer" if trial.number % 2 == 0 else "lstm"
     if family == "sequential":
@@ -240,32 +244,53 @@ def _choose_model_type(
     raise ValueError(f"Unknown model family '{requested_family}'.")
 
 
-def _suggest_common_model_block(trial: optuna.Trial) -> Dict[str, Any]:
-    """Sample shared architecture settings."""
-    d_model = int(trial.suggest_categorical("d_model", list(D_MODEL_CHOICES)))
-    dropout = float(trial.suggest_categorical("dropout", list(DROPOUT_CHOICES)))
-    output_head_divisor = int(
-        trial.suggest_categorical("output_head_divisor", list(OUTPUT_HEAD_DIVISOR_CHOICES))
-    )
-    output_head_dropout_factor = float(
-        trial.suggest_categorical(
-            "output_head_dropout_factor", list(OUTPUT_HEAD_DROPOUT_FACTOR_CHOICES)
-        )
-    )
-    film_clamp = float(trial.suggest_categorical("film_clamp", list(FILM_CLAMP_CHOICES)))
-
-    # Guard against invalid output-head widths if d_model is small.
-    if output_head_divisor > d_model:
-        raise optuna.TrialPruned(
-            f"output_head_divisor={output_head_divisor} invalid for d_model={d_model}."
-        )
-
+def _build_transformer_block(size_idx: int, dropout: float, ffn_type: str) -> Dict[str, Any]:
+    """Construct a transformer model_hyperparameters block from grid coordinates."""
+    size = TRANSFORMER_SIZES[size_idx]
     return {
-        "d_model": d_model,
-        "dropout": dropout,
-        "output_head_divisor": output_head_divisor,
-        "output_head_dropout_factor": output_head_dropout_factor,
-        "film_clamp": film_clamp,
+        "model_type": "transformer",
+        "d_model": int(size["d_model"]),
+        "dropout": float(dropout),
+        "film_clamp": float(FIXED_FILM_CLAMP),
+        "output_head_divisor": int(TRANSFORMER_FIXED_OUTPUT_HEAD_DIVISOR),
+        "output_head_dropout_factor": float(TRANSFORMER_FIXED_OUTPUT_HEAD_DROPOUT_FACTOR),
+        "head_activation": TRANSFORMER_FIXED_HEAD_ACTIVATION,
+        "transformer": {
+            "nhead": TRANSFORMER_FIXED_NHEAD,
+            "num_layers": int(size["num_layers"]),
+            "dim_feedforward": int(size["dim_feedforward"]),
+            "attention_dropout": float(FIXED_ATTENTION_DROPOUT),
+            "use_qk_norm": TRANSFORMER_FIXED_USE_QK_NORM,
+            "qkv_bias": TRANSFORMER_FIXED_QKV_BIAS,
+            "ffn_type": ffn_type,
+        },
+    }
+
+
+def _build_lstm_block(size_idx: int, dropout: float, head_activation: str) -> Dict[str, Any]:
+    """Construct an LSTM model_hyperparameters block from grid coordinates."""
+    size = LSTM_SIZES[size_idx]
+    return {
+        "model_type": "lstm",
+        "d_model": int(size["d_model"]),
+        "dropout": float(dropout),
+        "film_clamp": float(FIXED_FILM_CLAMP),
+        "output_head_divisor": int(LSTM_FIXED_OUTPUT_HEAD_DIVISOR),
+        "output_head_dropout_factor": float(LSTM_FIXED_OUTPUT_HEAD_DROPOUT_FACTOR),
+        "head_activation": head_activation,
+        "transformer": {
+            "nhead": TRANSFORMER_FIXED_NHEAD,
+            "num_layers": int(TRANSFORMER_SIZES[0]["num_layers"]),
+            "dim_feedforward": int(TRANSFORMER_SIZES[0]["dim_feedforward"]),
+            "attention_dropout": float(FIXED_ATTENTION_DROPOUT),
+            "use_qk_norm": TRANSFORMER_FIXED_USE_QK_NORM,
+            "qkv_bias": TRANSFORMER_FIXED_QKV_BIAS,
+            "ffn_type": LSTM_FIXED_FFN_TYPE,
+        },
+        "lstm": {
+            "num_layers": int(size["num_layers"]),
+            "bidirectional": LSTM_FIXED_BIDIRECTIONAL,
+        },
     }
 
 
@@ -274,84 +299,43 @@ def _suggest_search_space(
     base_config: Dict[str, Any],
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
-    """Sample a compact per-trial config delta.
+    """Sample a per-trial model_hyperparameters block from the grid.
 
-    This intentionally does NOT sample:
-    - learning_rate
-    - weight_decay
-    - batch_size
-    - Adam betas
-    - EMA decay
-    - scheduler type
-
-    Those stay fixed from the base config, which makes the architecture
-    comparison much faster and easier to interpret.
+    Search space per trial: dropout, activation, model size. ``model_type``
+    is sampled inside ``_choose_model_type`` when model_family='grid'.
+    Everything else (optimizer, scheduler, attention_dropout, film_clamp,
+    output_head_*) stays fixed.
     """
-    del base_config  # Kept in signature for future extension and objective symmetry.
+    del base_config  # Kept in signature for backward compat.
 
     n_trials_lstm = getattr(args, "n_trials_lstm", None)
     model_type = _choose_model_type(trial, args.model_family, n_trials_lstm)
     trial.set_user_attr("model_type", model_type)
 
-    common = _suggest_common_model_block(trial)
+    dropout = float(trial.suggest_categorical("dropout", list(DROPOUT_CHOICES)))
+
+    if args.model_family == "grid":
+        # Grid mode: one shared activation_idx, mapped per-arch in build helpers.
+        activation_idx = int(trial.suggest_categorical("activation_idx", [0, 1]))
+    else:
+        activation_idx = None
 
     if model_type == "transformer":
-        d_model = int(common["d_model"])
-
-        num_layers = int(
-            trial.suggest_categorical("num_layers_transformer", list(TRANSFORMER_LAYER_CHOICES))
-        )
-        ffn_mult = int(
-            trial.suggest_categorical("ffn_mult", list(TRANSFORMER_FFN_MULT_CHOICES))
-        )
-        dim_feedforward = d_model * ffn_mult
-        if dim_feedforward > DIM_FEEDFORWARD_MAX:
-            raise optuna.TrialPruned(
-                f"dim_feedforward={dim_feedforward} exceeds cap "
-                f"{DIM_FEEDFORWARD_MAX} (d_model={d_model} * ffn_mult={ffn_mult})."
+        size_idx = int(trial.suggest_categorical("size_idx", list(range(len(TRANSFORMER_SIZES)))))
+        if activation_idx is not None:
+            ffn_type = TRANSFORMER_FFN_TYPE_CHOICES[activation_idx]
+        else:
+            ffn_type = str(trial.suggest_categorical("ffn_type", list(TRANSFORMER_FFN_TYPE_CHOICES)))
+        model_block = _build_transformer_block(size_idx, dropout, ffn_type)
+    else:  # lstm
+        size_idx = int(trial.suggest_categorical("size_idx", list(range(len(LSTM_SIZES)))))
+        if activation_idx is not None:
+            head_activation = LSTM_HEAD_ACTIVATION_CHOICES[activation_idx]
+        else:
+            head_activation = str(
+                trial.suggest_categorical("head_activation", list(LSTM_HEAD_ACTIVATION_CHOICES))
             )
-        # Budget guard: the largest combo (d_model=512, ffn_mult=8, num_layers>=6)
-        # roughly triples per-epoch wall-clock relative to the prior best trial
-        # and risks pushing the 64-trial sweep past the 72h SLURM walltime.
-        # Pruned here so TPE redirects its budget to smaller configs.
-        if d_model == 512 and ffn_mult == 8 and num_layers >= 6:
-            raise optuna.TrialPruned(
-                f"Skipping high-cost combo (d_model={d_model}, ffn_mult={ffn_mult}, "
-                f"num_layers={num_layers}) to keep the sweep within walltime."
-            )
-        attention_dropout = float(
-            trial.suggest_categorical(
-                "attention_dropout", list(TRANSFORMER_ATTENTION_DROPOUT_CHOICES)
-            )
-        )
-
-        model_block = {
-            "model_type": "transformer",
-            **common,
-            "transformer": {
-                "nhead": TRANSFORMER_NHEAD_FIXED,
-                "num_layers": num_layers,
-                "dim_feedforward": dim_feedforward,
-                "attention_dropout": attention_dropout,
-                "use_qk_norm": TRANSFORMER_QK_NORM_FIXED,
-                "qkv_bias": True,
-                "ffn_type": TRANSFORMER_FFN_TYPE_FIXED,
-            },
-        }
-
-    else:
-        num_layers = int(
-            trial.suggest_categorical("num_layers_lstm", list(LSTM_LAYER_CHOICES))
-        )
-
-        model_block = {
-            "model_type": "lstm",
-            **common,
-            "lstm": {
-                "num_layers": num_layers,
-                "bidirectional": LSTM_BIDIRECTIONAL_FIXED,
-            },
-        }
+        model_block = _build_lstm_block(size_idx, dropout, head_activation)
 
     return {"model_hyperparameters": model_block}
 
@@ -448,6 +432,12 @@ def _build_objective(
                 n_trainable = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
                 trial.set_user_attr("num_parameters", int(n_params))
                 trial.set_user_attr("num_trainable", int(n_trainable))
+                if n_trainable > MAX_TRAINABLE_PARAMS:
+                    raise optuna.TrialPruned(
+                        f"Trial would train {n_trainable:,} parameters, exceeding the "
+                        f"{MAX_TRAINABLE_PARAMS:,} cap. Sampled architecture pruned to "
+                        "keep the sweep within the ~10M budget."
+                    )
 
             best_val = trainer.train()
             return float(best_val)
@@ -598,22 +588,48 @@ def _emit_leaderboard(study: optuna.Study, output_dir: Path) -> None:
 
 
 def _build_study(args: argparse.Namespace) -> optuna.Study:
-    sampler = optuna.samplers.TPESampler(
-        n_startup_trials=TPE_N_STARTUP_TRIALS,
-        n_ei_candidates=TPE_N_EI_CANDIDATES,
-        multivariate=True,
-        group=True,
-        constant_liar=True,
-        seed=int(args.sampler_seed),
-    )
+    if args.model_family == "grid":
+        # Exhaustive grid: 2 dropouts x 8 sizes x 2 activations x 2 archs = 64 cells.
+        # The 'activation_idx' param is a single 0/1 selector mapped per-arch:
+        #   transformer: 0 -> ffn_type="gelu",  1 -> ffn_type="swiglu"
+        #   lstm:        0 -> head_activation="gelu", 1 -> head_activation="silu"
+        # Using ONE shared param prevents GridSampler from blowing up to 128 cells.
+        if len(TRANSFORMER_SIZES) != len(LSTM_SIZES):
+            raise ValueError(
+                f"GridSampler requires TRANSFORMER_SIZES ({len(TRANSFORMER_SIZES)}) and "
+                f"LSTM_SIZES ({len(LSTM_SIZES)}) to share a length; otherwise the "
+                "size_idx categorical would not exhaustively cover both archs."
+            )
+        sampler: optuna.samplers.BaseSampler = optuna.samplers.GridSampler(
+            search_space={
+                "model_type": ["lstm", "transformer"],
+                "dropout": list(DROPOUT_CHOICES),
+                "size_idx": list(range(len(TRANSFORMER_SIZES))),
+                "activation_idx": [0, 1],
+            },
+            seed=int(args.sampler_seed),
+        )
+        logger.info(
+            "model_family='grid': using GridSampler over %d cells "
+            "(2 archs x 2 dropouts x 8 sizes x 2 activations).",
+            2 * len(DROPOUT_CHOICES) * len(TRANSFORMER_SIZES) * 2,
+        )
+    else:
+        sampler = optuna.samplers.TPESampler(
+            n_startup_trials=TPE_N_STARTUP_TRIALS_LEGACY,
+            n_ei_candidates=TPE_N_EI_CANDIDATES_LEGACY,
+            multivariate=True,
+            group=True,
+            constant_liar=True,
+            seed=int(args.sampler_seed),
+        )
 
     # When comparing both architectures, MedianPruner is unfair: transformer
     # trials converge faster and dominate the shared median, causing LSTM trials
     # to be pruned before they reach their asymptotic loss. Use NopPruner so
     # every trial runs to early-stopping completion on equal footing. The same
-    # reasoning applies to the strictly sequential layout (LSTM phase then
-    # transformer phase) — there is still no fair shared median.
-    if args.model_family in {"both", "sequential"}:
+    # reasoning applies to the strictly sequential and grid layouts.
+    if args.model_family in {"both", "sequential", "grid"}:
         pruner: optuna.pruners.BasePruner = optuna.pruners.NopPruner()
         logger.info(
             "model_family=%r: using NopPruner so both architectures run "
@@ -622,7 +638,7 @@ def _build_study(args: argparse.Namespace) -> optuna.Study:
         )
     else:
         pruner = optuna.pruners.MedianPruner(
-            n_startup_trials=TPE_N_STARTUP_TRIALS,
+            n_startup_trials=TPE_N_STARTUP_TRIALS_LEGACY,
             n_warmup_steps=int(args.prune_warmup_epochs),
             interval_steps=1,
         )
@@ -676,13 +692,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-family",
         type=str,
-        choices=("config", "both", "sequential", "transformer", "lstm"),
-        default="config",
+        choices=("grid", "config", "both", "sequential", "transformer", "lstm"),
+        default="grid",
         help=(
+            "'grid' (default) runs a 64-cell exhaustive grid via GridSampler: "
+            "2 archs x 2 dropouts x 8 sizes x 2 activations. "
             "'config' uses model_hyperparameters.model_type from the base config. "
             "'both' alternates transformer/LSTM trials by trial number. "
             "'sequential' runs the first --n-trials-lstm trials as LSTM, the "
-            "remainder as transformer (default split is --n-trials // 2)."
+            "remainder as transformer."
         ),
     )
     parser.add_argument("--n-trials", type=int, default=N_TRIALS_DEFAULT)
@@ -750,6 +768,21 @@ def main() -> int:
         if args.model_family == "config":
             args.model_family = str(base_config["model_hyperparameters"]["model_type"]).lower()
             logger.info("Resolved --model-family config to '%s'.", args.model_family)
+
+        if args.model_family == "grid":
+            grid_size = 2 * len(DROPOUT_CHOICES) * len(TRANSFORMER_SIZES) * 2
+            if args.n_trials != grid_size:
+                logger.info(
+                    "model_family='grid': overriding --n-trials %d -> %d to cover the full grid.",
+                    int(args.n_trials),
+                    grid_size,
+                )
+                args.n_trials = grid_size
+            if args.n_trials_lstm is not None:
+                raise ValueError(
+                    "--n-trials-lstm is not used with --model-family=grid; the 64-cell "
+                    "grid balances 32 LSTM + 32 transformer trials automatically."
+                )
 
         if args.model_family == "sequential":
             if args.n_trials_lstm is None:

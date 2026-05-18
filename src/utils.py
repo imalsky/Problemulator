@@ -560,6 +560,7 @@ def validate_config(config: Dict[str, Any]) -> None:
         "max_sequence_length",
         "output_head_divisor",
         "output_head_dropout_factor",
+        "head_activation",
     }
     missing_model_keys = required_model_keys - set(model_params.keys())
     if missing_model_keys:
@@ -600,6 +601,15 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError("'model_hyperparameters.film_clamp' must be numeric.")
     if float(film_clamp) <= 0.0:
         raise ValueError("'model_hyperparameters.film_clamp' must be > 0.")
+
+    head_activation = model_params["head_activation"]
+    if not isinstance(head_activation, str):
+        raise ValueError("'model_hyperparameters.head_activation' must be a string.")
+    if head_activation.lower() not in {"gelu", "silu", "relu"}:
+        raise ValueError(
+            "'model_hyperparameters.head_activation' must be one of "
+            f"{{'gelu', 'silu', 'relu'}} (got {head_activation!r})."
+        )
 
     output_head_divisor = int(model_params["output_head_divisor"])
     if output_head_divisor > d_model:
@@ -840,16 +850,13 @@ def validate_config(config: Dict[str, Any]) -> None:
             f"Unknown loss.type {loss_type_raw!r}. Allowed: 'signed_log_adaptive'."
         )
 
-    signed_log_keys = {
+    fractional_l1_keys = {
         "lambda_z",
         "lambda_phys",
-        "weight_mode",
-        "weight_power",
-        "w_min",
-        "w_max",
+        "fractional_epsilon",
         "p_norm",
     }
-    missing_loss_keys = signed_log_keys - set(loss_section.keys())
+    missing_loss_keys = fractional_l1_keys - set(loss_section.keys())
     if missing_loss_keys:
         raise ValueError(
             "Missing required loss keys for type='signed_log_adaptive': "
@@ -871,29 +878,20 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError(
             "'loss.lambda_z' and 'loss.lambda_phys' cannot both be zero."
         )
-    weight_mode = loss_section["weight_mode"]
-    if not isinstance(weight_mode, str) or weight_mode.lower() not in {
-        "uniform",
-        "range",
-    }:
-        raise ValueError("'loss.weight_mode' must be 'uniform' or 'range'.")
-    weight_power = loss_section["weight_power"]
-    if not isinstance(weight_power, (int, float)) or isinstance(weight_power, bool):
-        raise ValueError("'loss.weight_power' must be numeric.")
-    if not math.isfinite(float(weight_power)) or float(weight_power) < 0.0:
-        raise ValueError("'loss.weight_power' must be a finite non-negative number.")
-    w_min = loss_section["w_min"]
-    w_max = loss_section["w_max"]
-    for label, value in (("w_min", w_min), ("w_max", w_max)):
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            raise ValueError(f"'loss.{label}' must be numeric.")
-        if not math.isfinite(float(value)):
-            raise ValueError(f"'loss.{label}' must be finite.")
-    if not (0.0 < float(w_min) <= float(w_max)):
-        raise ValueError("'loss' weight bounds must satisfy 0 < w_min <= w_max.")
+    fractional_epsilon = loss_section["fractional_epsilon"]
+    if (
+        not isinstance(fractional_epsilon, (int, float))
+        or isinstance(fractional_epsilon, bool)
+    ):
+        raise ValueError("'loss.fractional_epsilon' must be numeric.")
+    if (
+        not math.isfinite(float(fractional_epsilon))
+        or float(fractional_epsilon) <= 0.0
+    ):
+        raise ValueError("'loss.fractional_epsilon' must be finite and > 0.")
     p_norm = loss_section["p_norm"]
-    if isinstance(p_norm, bool) or not isinstance(p_norm, int) or p_norm not in (1, 2):
-        raise ValueError("'loss.p_norm' must be the integer 1 or 2.")
+    if isinstance(p_norm, bool) or not isinstance(p_norm, int) or p_norm != 1:
+        raise ValueError("'loss.p_norm' must be the integer 1.")
 
     # miscellaneous_settings
     misc = require_section("miscellaneous_settings")

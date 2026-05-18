@@ -357,22 +357,19 @@ Current policy:
   - `min_lr = 1e-8`
   - `weight_decay = 0.05`
   - `gradient_clip_val = 2.0`
-  - `loss.type = signed_log_adaptive`, `loss.lambda_z = 0.5`, `loss.lambda_phys = 0.5`,
-    `loss.weight_mode = range`, `loss.weight_power = 0.5`, `loss.w_min = 0.5`,
-    `loss.w_max = 2.0`, `loss.p_norm = 1`
+  - `loss.type = signed_log_adaptive`, `loss.lambda_z = 1.0`,
+    `loss.lambda_phys = 0.0`, `loss.fractional_epsilon = 1.0`,
+    `loss.p_norm = 1`
 
-The active loss is per-channel-weighted signed-log + normalized MSE:
-`L = lambda_z * masked_mean((pred_z - true_z)^2) + lambda_phys * sum_c w_c *
-|signed_log10(p_phys_c) - signed_log10(t_phys_c)|^p_norm`, where
-`signed_log10(x) = sign(x) * log10(|x| + 1)`. The signed-log space is
-sign-preserving and well-defined at zero, so the loss avoids the divisive
-amplification that the legacy `(p - t)^2 / (t^2 + eps)` term produced near
-flux zero-crossings. Per-channel weights `w_c` are derived from the per-target
-signed-log spread (the `std` field stored in `normalization_metadata.json`),
-clamped to `[w_min, w_max]`, and renormalized so `mean(w) = 1`. The legacy
-`hybrid_fractional` loss (`lambda_mse * MSE(z) + lambda_frac * fractional`)
-remains available as an opt-in via `loss.type = "hybrid_fractional"`; both
-paths share the same padding-mask reduction over non-padding target elements.
+The active loss is normalized MSE plus an optional physical-space fractional L1
+term:
+`L = lambda_z * masked_mean((pred_z - true_z)^2) + lambda_phys *
+masked_mean(|pred_phys - true_phys| / sqrt(true_phys^2 + fractional_epsilon))`.
+Predictions and targets enter the loss in normalized space; the physical term
+denormalizes each target channel using `normalization_metadata.json`. Setting
+`lambda_phys = 0` gives pure normalized-space MSE and skips physical-space
+denormalization in the loss forward pass. `p_norm` is retained as a compatibility
+guard and must be `1`.
 
 ## 14. Implementation Checklist
 

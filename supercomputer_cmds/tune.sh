@@ -14,13 +14,29 @@
 #SBATCH --mail-user=isaac.n.malsky@jpl.nasa.gov
 
 # Drive the Optuna hyperparameter search defined in src/tune.py.
-# Default layout: MODEL_FAMILY=sequential with N_TRIALS=32 -> 16 LSTM trials
-# (trials 0-15), followed by 16 transformer trials (trials 16-31). Both phases
-# run with NopPruner so no cross-architecture median-pruning bias creeps in.
+#
+# Default layout: MODEL_FAMILY=grid runs a 64-cell exhaustive sweep via
+# Optuna's GridSampler. The 64 cells are the cartesian product of:
+#   - 2 architectures (transformer, lstm)
+#   - 2 dropout values (0.0, 0.05)
+#   - 8 model-size variants per arch (~0.6M to ~9.7M, all under the 10M cap;
+#     see TRANSFORMER_SIZES / LSTM_SIZES in src/tune.py)
+#   - 2 activation functions per arch
+#       transformer: ffn_type in {gelu, swiglu}
+#       lstm:        head_activation in {gelu, silu}
+# Each cell runs exactly once -> 32 LSTM trials + 32 transformer trials with
+# no duplicates. attention_dropout and film_clamp are NOT varied; they sit at
+# the v3-config defaults (0.0 and 1000.0).
+#
 # Each trial is given EPOCHS=60, DATA_FRACTION=0.2, PATIENCE=12 by default --
 # a deliberately heavier per-trial budget than the prior 30-epoch/10%-data
 # screening sweep, intended to actually converge each trial so the architecture
 # comparison is meaningful rather than budget-limited.
+#
+# At ~10M models the per-trial wall-clock is ~3x faster than the prior 26.4M
+# sweep, so 64 trials at the same per-trial budget fit the 72h walltime with
+# margin. Override MODEL_FAMILY to 'sequential' or 'both' to fall back to the
+# legacy TPE sampler.
 # Override MODEL_FAMILY for other layouts: 'both' (interleaved by trial number),
 # 'transformer'/'lstm' (single architecture), or 'config' (whatever the base
 # config declares). Only the top 5 checkpoints are kept.
@@ -103,17 +119,19 @@ CONDA_ENV="${CONDA_ENV:-nn}"
 MERGED_NAME="${MERGED_NAME:-picaso_results_5M.h5}"
 TRAIN_RAW_NAME="${TRAIN_RAW_NAME:-$MERGED_NAME}"
 BASE_CONFIG="${BASE_CONFIG:-config/lstm_main_v3.jsonc}"
-MODEL_FAMILY="${MODEL_FAMILY:-sequential}"
+MODEL_FAMILY="${MODEL_FAMILY:-grid}"
 STUDY_NAME="${STUDY_NAME:-rt_tune_$(date +%Y%m%d_%H%M%S)}"
-# Defaults tuned for a "good comparison" sweep that fits in ~72h SLURM
-# walltime. With MODEL_FAMILY=sequential, 32 trials = 16 LSTM (trials 0-15)
-# followed by 16 transformer (trials 16-31). Override N_TRIALS_LSTM to change
-# the split. Estimated budget (post search-space expansion in src/tune.py):
-#   ~22.7 min/trial at the prior 30-epoch/10%-data config × 2 (epochs)
-#                                                       × 2 (data)
-#                                                       × ~1.3 (wider space)
-#     = ~118 min/trial avg => 32 * 1.97h = ~63h. Fits 69h timeout with margin.
-N_TRIALS="${N_TRIALS:-32}"
+# Defaults tuned for the 64-cell exhaustive grid (2 archs * 2 dropouts * 8
+# sizes * 2 activations). With MODEL_FAMILY=grid (default), N_TRIALS is
+# auto-clamped to 64 by tune.py so you cover every cell exactly once.
+# N_TRIALS_LSTM is unused in grid mode (must be empty); set it only when
+# overriding to MODEL_FAMILY=sequential.
+# Per-trial budget estimate at the new 10M-param size grid:
+#   ~22.7 min/trial at 30 epochs/10% data x (60/30 epochs) x (0.2/0.1 data)
+#     x ~1.3 wider-space x 0.6 smaller-models = ~71 min/trial.
+#   64 trials * 1.18h = ~76h. Headroom is tight; halve EPOCHS or DATA_FRACTION
+#   if you need to finish within 72h.
+N_TRIALS="${N_TRIALS:-64}"
 N_TRIALS_LSTM="${N_TRIALS_LSTM:-}"
 # ~69h leaves a 3h margin under the 72h walltime so the leaderboard flush
 # can complete before SLURM hard-kills the job.

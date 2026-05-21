@@ -8,6 +8,15 @@
 #
 # Default sizing targets a 5,000,000-profile run in 50 shards of 100,000 profiles each.
 # Adjust TOTAL_PROFILES, SHARD_SIZE, and the --array directive after a one-shard benchmark.
+#
+# Submission flow from the repo root (gen_profiles.sh must run first because
+# in-array flock does not provide cross-node mutual exclusion on GPFS):
+#     GEN=$(sbatch --parsable Problemulator/supercomputer_cmds/gen_profiles.sh)
+#     sbatch --dependency=afterok:$GEN --kill-on-invalid-dep=yes \
+#         Problemulator/supercomputer_cmds/gen.sh
+#
+# This script hard-fails if gen_data/$INPUT_PATH or its .done sentinel is
+# missing — it no longer attempts to generate the input file itself.
 
 #SBATCH -J picaso_rt_array
 #SBATCH -o picaso_%A_%a.out
@@ -188,35 +197,18 @@ fi
 
 mkdir -p "gen_data/$(dirname "$OUTPUT_PATH")"
 
-# ----- Ensure the synthetic-profiles input file exists -----
-# Generates gen_data/$INPUT_PATH with $TOTAL_PROFILES profiles if it's missing.
-# Serialized via flock so concurrent array tasks don't double-generate.
-# Override the seed via PROFILE_SEED env var; skip this step entirely by pre-generating
-# the file or setting SKIP_PROFILE_GEN=1.
-PROFILE_SEED="${PROFILE_SEED:-20260423}"
+# ----- Require the synthetic-profiles input file -----
+# Profile generation is handled by gen_profiles.sh as a single-task job submitted
+# before this array. We refuse to start a shard if the input file or its
+# completion sentinel is missing (per spec §2: fail fast, no silent fallback).
 INPUT_FULL_PATH="gen_data/$INPUT_PATH"
-INPUT_LOCK_PATH="${INPUT_FULL_PATH}.lock"
+DONE_SENTINEL="${INPUT_FULL_PATH}.done"
 
-mkdir -p "$(dirname "$INPUT_FULL_PATH")"
-
-if [[ ! -f "$INPUT_FULL_PATH" && "${SKIP_PROFILE_GEN:-0}" != "1" ]]; then
-    (
-        flock -x 7
-        if [[ ! -f "$INPUT_FULL_PATH" ]]; then
-            echo "Input file missing — generating $TOTAL_PROFILES synthetic profiles (seed=$PROFILE_SEED)..."
-            python -u gen_data/create_profiles.py \
-                --n-profiles "$TOTAL_PROFILES" \
-                --config "$PROFILE_CONFIG" \
-                --ncpus "$NCPUS" \
-                --seed "$PROFILE_SEED" \
-                --output "$INPUT_PATH"
-            echo "Profile generation complete: $INPUT_FULL_PATH"
-        fi
-    ) 7>"$INPUT_LOCK_PATH"
-fi
-
-if [[ ! -f "$INPUT_FULL_PATH" ]]; then
-    echo "Input file still missing after generation attempt: $INPUT_FULL_PATH" >&2
+if [[ ! -f "$INPUT_FULL_PATH" || ! -f "$DONE_SENTINEL" ]]; then
+    echo "Required input HDF5 or completion sentinel is missing:" >&2
+    echo "  $INPUT_FULL_PATH (exists=$([[ -f $INPUT_FULL_PATH ]] && echo yes || echo no))" >&2
+    echo "  $DONE_SENTINEL (exists=$([[ -f $DONE_SENTINEL ]] && echo yes || echo no))" >&2
+    echo "Submit gen_profiles.sh first; see the header comment for the dependency-chain command." >&2
     exit 1
 fi
 
@@ -230,7 +222,7 @@ echo "Shard index:         $SHARD_INDEX"
 echo "Shard range:         [$START_INDEX, $END_INDEX)"
 echo "Total profiles:      $TOTAL_PROFILES"
 echo "Shard size:          $SHARD_SIZE"
-echo "Profile seed:        $PROFILE_SEED"
+echo "Completion sentinel: $DONE_SENTINEL"
 echo "Worker processes:    $NCPUS (source: $NCPUS_SOURCE)"
 echo "Read chunk size:     $READ_CHUNK_SIZE"
 echo "Worker chunksize:    $WORKER_CHUNKSIZE"

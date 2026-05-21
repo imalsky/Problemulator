@@ -69,13 +69,10 @@ class ConfigAndHardwareTests(unittest.TestCase):
             parameter.numel() for parameter in lstm_model.parameters() if parameter.requires_grad
         )
 
-        # transformer_main_v3: d_model=512, num_layers=5, dim_feedforward=4096,
-        # output_head_divisor=2 (winning trial of tune_rt_tune_20260512_181651).
-        # lstm_main_v3: d_model=512, num_layers=5, bidirectional, scaled up from
-        # the best LSTM trial (#2, 2 layers, 9.7M) to put it in the same
-        # parameter regime as the transformer (~24M vs 26M).
-        self.assertEqual(transformer_params, 26408194)
-        self.assertEqual(lstm_params, 23921154)
+        # transformer_main_v3 and lstm_main_v3 are intentionally matched near
+        # 10M parameters for the current paper-comparable rerun.
+        self.assertEqual(transformer_params, 9602306)
+        self.assertEqual(lstm_params, 9730050)
 
     def test_validate_config_rejects_none_normalization(self) -> None:
         """Required variables may not use the removed 'none' normalization mode."""

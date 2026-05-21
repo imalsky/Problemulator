@@ -68,6 +68,7 @@ export PYTHONUNBUFFERED=1
 CONDA_ENV="${CONDA_ENV:-nn}"
 INPUT_PATH="${INPUT_PATH:-output/synthetic_profiles_5M.h5}"
 OPACITY_PATH="${OPACITY_PATH:-}"
+PROFILE_CONFIG="${PROFILE_CONFIG:-config/paper_comparable_profiles.jsonc}"
 
 TOTAL_PROFILES="${TOTAL_PROFILES:-5000000}"
 SHARD_SIZE="${SHARD_SIZE:-100000}"
@@ -205,6 +206,7 @@ if [[ ! -f "$INPUT_FULL_PATH" && "${SKIP_PROFILE_GEN:-0}" != "1" ]]; then
             echo "Input file missing — generating $TOTAL_PROFILES synthetic profiles (seed=$PROFILE_SEED)..."
             python -u gen_data/create_profiles.py \
                 --n-profiles "$TOTAL_PROFILES" \
+                --config "$PROFILE_CONFIG" \
                 --ncpus "$NCPUS" \
                 --seed "$PROFILE_SEED" \
                 --output "$INPUT_PATH"
@@ -222,6 +224,7 @@ echo "------------------------------------------------"
 echo "Project root:        $PROJECT_ROOT"
 echo "Conda env:           $CONDA_ENV"
 echo "Input HDF5:          gen_data/$INPUT_PATH"
+echo "Profile config:      gen_data/$PROFILE_CONFIG"
 echo "Output HDF5:         gen_data/$OUTPUT_PATH"
 echo "Shard index:         $SHARD_INDEX"
 echo "Shard range:         [$START_INDEX, $END_INDEX)"

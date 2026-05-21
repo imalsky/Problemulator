@@ -22,10 +22,15 @@ for path in (SRC_DIR, GEN_DATA_DIR):
         sys.path.insert(0, str(path))
 
 from create_profiles import (
-    MAX_VALID_TEMPERATURE_K,
+    DEFAULT_CONFIG as DEFAULT_PROFILE_CONFIG,
     SCALAR_KEYS,
     _append_profile_batch as append_generated_profile_batch,
     _create_profile_hdf5,
+    _stable_config_sha256,
+    _write_profile_metadata_attrs,
+    get_temperature_validation_config,
+    load_profile_config,
+    validate_temperature_profile,
 )
 from normalizer import DataNormalizer
 from preprocess import preprocess_data
@@ -225,9 +230,14 @@ class PreprocessAndGenerationTests(unittest.TestCase):
             with h5py.File(output_path, "a") as h5_file:
                 self.assertEqual(append_generated_profile_batch(h5_file, batch_one), 1)
                 self.assertEqual(append_generated_profile_batch(h5_file, batch_two), 2)
-                h5_file.attrs["requested_profiles"] = 3
-                h5_file.attrs["valid_profiles"] = 3
-                h5_file.attrs["max_valid_temperature_k"] = float(MAX_VALID_TEMPERATURE_K)
+                _write_profile_metadata_attrs(
+                    h5_file,
+                    config=DEFAULT_PROFILE_CONFIG,
+                    config_source="DEFAULT_CONFIG",
+                    config_sha256=_stable_config_sha256(DEFAULT_PROFILE_CONFIG),
+                    requested_profiles=3,
+                    valid_profiles=3,
+                )
 
             with h5py.File(output_path, "r") as h5_file:
                 self.assertEqual(h5_file.attrs["generator"], "create_profiles.py")
@@ -235,7 +245,15 @@ class PreprocessAndGenerationTests(unittest.TestCase):
                 self.assertEqual(int(h5_file.attrs["pressure_levels"]), n_pressure)
                 self.assertEqual(int(h5_file.attrs["requested_profiles"]), 3)
                 self.assertEqual(int(h5_file.attrs["valid_profiles"]), 3)
-                self.assertEqual(float(h5_file.attrs["max_valid_temperature_k"]), MAX_VALID_TEMPERATURE_K)
+                self.assertEqual(h5_file.attrs["profile_config_path"], "DEFAULT_CONFIG")
+                self.assertEqual(
+                    h5_file.attrs["profile_config_sha256"],
+                    _stable_config_sha256(DEFAULT_PROFILE_CONFIG),
+                )
+                self.assertEqual(float(h5_file.attrs["min_valid_temperature_k"]), 50.0)
+                self.assertEqual(float(h5_file.attrs["max_valid_temperature_k"]), 4000.0)
+                self.assertEqual(float(h5_file.attrs["min_bottom_temperature_k"]), 1000.0)
+                self.assertEqual(float(h5_file.attrs["max_top_temperature_k"]), 2800.0)
                 for key in ("pressure_bar", "temperature_k"):
                     self.assertIn(key, h5_file)
                     self.assertEqual(h5_file[key].dtype, np.float32)
@@ -244,6 +262,42 @@ class PreprocessAndGenerationTests(unittest.TestCase):
                     self.assertIn(key, h5_file)
                     self.assertEqual(h5_file[key].dtype, np.float32)
                     self.assertEqual(h5_file[key].shape[0], 3)
+
+    def test_profile_config_jsonc_loads_validation_and_paper_priors(self) -> None:
+        """The paper-comparable profile config should drive validation and priors."""
+        config, source, digest = load_profile_config("config/paper_comparable_profiles.jsonc")
+        validation = get_temperature_validation_config(config)
+
+        self.assertEqual(source, "config/paper_comparable_profiles.jsonc")
+        self.assertEqual(digest, _stable_config_sha256(config))
+        self.assertEqual(validation["min_temperature_k"], 50.0)
+        self.assertEqual(validation["max_temperature_k"], 4000.0)
+        self.assertEqual(validation["min_bottom_temperature_k"], 1000.0)
+        self.assertEqual(validation["max_top_temperature_k"], 2800.0)
+        self.assertEqual(config["log_kappa_ir_m2_kg"]["distribution"], "normal")
+        self.assertEqual(config["T_internal_k"]["distribution"], "uniform")
+        self.assertEqual(config["T_internal_k"]["min"], 400.0)
+        self.assertEqual(config["T_internal_k"]["max"], 700.0)
+        self.assertEqual(config["power_law_n"]["min"], -0.5)
+        self.assertEqual(config["power_law_n"]["max"], 1.0)
+
+    def test_temperature_validation_rejects_cold_bottom_and_hot_top(self) -> None:
+        """Profile validation should enforce the config-driven paper filters."""
+        validation = get_temperature_validation_config(DEFAULT_PROFILE_CONFIG)
+
+        cold_bottom = np.asarray([600.0, 900.0], dtype=np.float64)
+        is_valid, reason = validate_temperature_profile(cold_bottom, validation)
+        self.assertFalse(is_valid)
+        self.assertIn("Bottom temperature", reason)
+
+        hot_top = np.asarray([2900.0, 1200.0], dtype=np.float64)
+        is_valid, reason = validate_temperature_profile(hot_top, validation)
+        self.assertFalse(is_valid)
+        self.assertIn("Top temperature", reason)
+
+        valid_profile = np.asarray([1000.0, 1500.0], dtype=np.float64)
+        is_valid, reason = validate_temperature_profile(valid_profile, validation)
+        self.assertTrue(is_valid, reason)
 
     def test_run_picaso_output_schema_is_stable(self) -> None:
         """PICASO orchestration helpers should preserve output attrs, keys, and dtypes."""

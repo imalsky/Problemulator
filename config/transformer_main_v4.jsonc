@@ -25,9 +25,10 @@
   //   - adam_beta2: 0.95 -> 0.999. Paper used PyTorch defaults. 0.95 is the
   //     LLaMA convention; faster second-moment decay can settle on biased
   //     operating points for slow-converging tails.
-  //   - early_stopping_patience: 100 -> 99999. Paper used 99999 (effectively
-  //     off). v3's best_epoch was 81/300; the low-flux tail may not have
-  //     finished converging.
+  //   - early_stopping_patience: 100 -> 30. Tighter than v3 to keep total
+  //     SLURM cost bounded; turning off EMA/AMP and reverting film_clamp/betas
+  //     should let the low-flux tail converge faster, so 30 epochs of no
+  //     improvement is enough to call the run done.
   //
   // Preserved from v3 (matched-architecture vs lstm_main_v4 at ~10M params):
   //   - d_model=512, num_layers=3, ffn_mult=4 -> dim_feedforward=2048,
@@ -185,9 +186,7 @@
     "plateau_threshold": 1e-05,
     // Available threshold modes: "abs", "rel"
     "plateau_threshold_mode": "abs",
-    // Effectively off (paper used 99999). v3 used 100 and best_epoch=81/300
-    // suggests the low-flux tail had not finished converging.
-    "early_stopping_patience": 99999,
+    "early_stopping_patience": 30,
     "min_delta": 1e-05,
     // Disabled vs v3 to avoid bfloat16 weight-quantization bias at low fluxes.
     "use_amp": false,

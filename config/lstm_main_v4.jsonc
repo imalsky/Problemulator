@@ -1,15 +1,45 @@
 {
+  // v4 — LSTM baseline alongside transformer_main_v4. Same goal: eliminate
+  // the low-pressure signed-mean bias documented in
+  // Paper_Work/audit_2026-05-08.md:43. Strategy mirrors transformer_main_v4 —
+  // disable every "modernization" present in v3 but ABSENT from
+  // Problemulator_SAFE_PAPER_VERSION/config/config.jsonc that could plausibly
+  // bias low-magnitude predictions.
+  //
+  // Disabled vs v3:
+  //   - use_amp: true -> false. bfloat16 autocast has ~7-bit mantissa; low-
+  //     magnitude activations/gradients quantize non-uniformly. Paper was
+  //     pure float32.
+  //   - ema_decay: 0.999 -> 0. train.py:1122-1126 saves EMA weights as
+  //     best_model.pt and inference IS EMA. Paper had no EMA.
+  //   - film_clamp: 1000.0 -> 10.0. Paper value
+  //     (SAFE_PAPER_VERSION/config/config.jsonc:70). The v3 file's comment
+  //     claimed 1000 was "the paper value" but it was actually 10.
+  //   - output_head_dropout_factor: 0.25 -> 0.0. Not in the paper config.
+  //     With dropout=0 this may already be a no-op; zeroing is conservative.
+  //   - adam_beta2: 0.95 -> 0.999. Paper used PyTorch defaults.
+  //   - early_stopping_patience: 100 -> 99999. Paper used 99999 (effectively
+  //     off). Lets the low-flux tail keep converging under the cosine
+  //     schedule.
+  //
+  // Preserved from v3 (matched to transformer_main_v4 at ~10M params):
+  //   - d_model=512, num_layers=2 bidirectional. ~9.73M trainable.
+  //   - symlog flux normalization, percentile 0.01.
+  //   - weight_decay=1e-5, lr=1e-4, batch_size=256.
+  //
+  // Training schedule and loss are identical to transformer_main_v4 for an
+  // apples-to-apples comparison.
   "miscellaneous_settings": {
     "random_seed": 42,
     "num_workers": 1,
     "detect_anomaly": false,
     "shard_size": 10000,
     "hdf5_read_chunk_size": 8192,
-    "device_backend": "cpu",
+    "device_backend": "cuda",
     "torch_compile": false,
     "compile_mode": "default",
-    "execution_mode": "normalize",
-    "rebuild_processed_data": true,
+    "execution_mode": "train",
+    "rebuild_processed_data": false,
     "dataset_loading_mode": "auto",
     "dataset_max_cached_shards": 200,
     "dataset_large_shard_mmap_bytes": 52428800,
@@ -18,7 +48,7 @@
   },
   "data_paths_config": {
     "hdf5_dataset_filename": [
-      "picaso_results_paper_pilot_50k.h5"
+      "picaso_results_5M.h5"
     ],
     "dataset_splits_filename": "dataset_splits.json",
     "dataset_split_fractions": {
@@ -80,29 +110,35 @@
     "forward_dtype": "float32",
     "loss_dtype": "float32",
     "optimizer_state_dtype": "float32",
-    "amp_autocast_dtype": "none",
+    // Inert when use_amp=false but kept for schema compatibility.
+    "amp_autocast_dtype": "bfloat16",
     "float32_matmul_precision": "high"
   },
   "model_hyperparameters": {
-    "model_type": "transformer",
+    "model_type": "lstm",
     "d_model": 512,
     "dropout": 0.0,
-    "film_clamp": 1000.0,
+    // Paper value (SAFE_PAPER_VERSION/config/config.jsonc:70). v3 used 1000.
+    "film_clamp": 10.0,
     "max_sequence_length": 75,
-    "output_head_divisor": 2,
+    "output_head_divisor": 1,
+    // Zeroed vs v3 (was 0.25). Not in the paper config; conservative revert.
     "output_head_dropout_factor": 0.0,
+    // Activation in the 2-linear output projection head. Paper default "gelu".
     "head_activation": "gelu",
+    // Transformer block is unused for model_type=lstm but required by the
+    // schema; values are placeholders.
     "transformer": {
       "nhead": 4,
-      "num_layers": 3,
-      "dim_feedforward": 2048,
+      "num_layers": 4,
+      "dim_feedforward": 1024,
       "attention_dropout": 0.0,
-      "use_qk_norm": true,
+      "use_qk_norm": false,
       "qkv_bias": true,
       "ffn_type": "gelu"
     },
     "lstm": {
-      "num_layers": 3,
+      "num_layers": 2,
       "bidirectional": true
     }
   },
@@ -112,8 +148,9 @@
     "learning_rate": 0.0001,
     "weight_decay": 1e-5,
     "optimizer": "adamw",
+    // PyTorch defaults (paper). v3 used 0.95 (LLaMA convention).
     "adam_beta1": 0.9,
-    "adam_beta2": 0.95,
+    "adam_beta2": 0.999,
     "gradient_clip_val": 2.0,
     "scheduler_type": "cosine",
     "min_lr": 1e-08,
@@ -124,10 +161,13 @@
     "plateau_factor": 0.5,
     "plateau_threshold": 1e-05,
     "plateau_threshold_mode": "abs",
-    "early_stopping_patience": 100,
+    // Effectively off (paper used 99999).
+    "early_stopping_patience": 99999,
     "min_delta": 1e-05,
+    // Disabled vs v3 to avoid bfloat16 weight-quantization bias at low fluxes.
     "use_amp": false,
-    "ema_decay": 0.999,
+    // Disabled vs v3. EMA weights are loaded at inference (train.py:1122-1126).
+    "ema_decay": 0,
     "dataset_fraction_to_use": 1.0
   },
   "loss": {
@@ -142,6 +182,6 @@
     "w_max": 1.0
   },
   "output_paths_config": {
-    "fixed_model_foldername": "pilot_paper_50k"
+    "fixed_model_foldername": "lstm_main"
   }
 }

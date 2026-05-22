@@ -1,0 +1,221 @@
+{
+  // v4 — eliminate the low-pressure signed-mean bias documented in
+  // Paper_Work/audit_2026-05-08.md:43 (thermal signed mean went from +0.06%
+  // in SAFE_PAPER_VERSION to +16.3% in the v3 trained model, with the bias
+  // concentrated at low pressures / small flux magnitudes).
+  //
+  // Strategy: disable every "modernization" present in v3 but ABSENT from
+  // Problemulator_SAFE_PAPER_VERSION/config/config.jsonc that could plausibly
+  // bias low-magnitude predictions. Architecture is kept identical to v3 so
+  // this isolates the training-time knobs.
+  //
+  // Disabled vs v3:
+  //   - use_amp: true -> false. bfloat16 autocast has ~7-bit mantissa; low-
+  //     magnitude activations/gradients quantize non-uniformly. Paper was
+  //     pure float32.
+  //   - ema_decay: 0.999 -> 0. train.py:1122-1126 saves EMA weights as
+  //     best_model.pt and inference IS EMA; if late-training refines the
+  //     low-flux tail more than early training, EMA permanently lags. Paper
+  //     had no EMA.
+  //   - use_qk_norm: true -> false. Not in the paper transformer.
+  //   - film_clamp: 1000.0 -> 10.0. The v3 file's comment claimed 1000 was
+  //     "the paper value" but SAFE_PAPER_VERSION/config/config.jsonc:70 is
+  //     10.0. The May-2026 revert silently kept 1000 (a 100x larger FiLM
+  //     envelope than the paper).
+  //   - adam_beta2: 0.95 -> 0.999. Paper used PyTorch defaults. 0.95 is the
+  //     LLaMA convention; faster second-moment decay can settle on biased
+  //     operating points for slow-converging tails.
+  //   - early_stopping_patience: 100 -> 99999. Paper used 99999 (effectively
+  //     off). v3's best_epoch was 81/300; the low-flux tail may not have
+  //     finished converging.
+  //
+  // Preserved from v3 (matched-architecture vs lstm_main_v4 at ~10M params):
+  //   - d_model=512, num_layers=3, ffn_mult=4 -> dim_feedforward=2048,
+  //     attention_dropout=0, output_head_divisor=2, head_activation=gelu,
+  //     ffn_type=gelu. Resulting trainable parameter count: ~9.6M.
+  //   - symlog flux normalization, percentile 0.01.
+  //   - weight_decay=1e-5, lr=1e-4, batch_size=256.
+  //
+  // The loss is pure z-MSE (signed_log_adaptive with lambda_phys=0).
+  "miscellaneous_settings": {
+    "random_seed": 42,
+    "num_workers": 1,
+    "detect_anomaly": false,
+    "shard_size": 10000,
+    "hdf5_read_chunk_size": 8192,
+    // Available backends: "cuda", "mps", "cpu"
+    "device_backend": "cuda",
+    "torch_compile": false,
+    // Available compile modes: "default", "reduce-overhead",
+    // "max-autotune", "max-autotune-no-cudagraphs"
+    "compile_mode": "default",
+    // Available modes: "normalize", "train"
+    "execution_mode": "train",
+    "rebuild_processed_data": false,
+    // Available dataset loading modes: "auto", "ram", "disk"
+    "dataset_loading_mode": "auto",
+    "dataset_max_cached_shards": 200,
+    "dataset_large_shard_mmap_bytes": 52428800,
+    "dataset_ram_safety_fraction": 0.8,
+    "dataset_copy_mmap_slices": true
+  },
+  "data_paths_config": {
+    "hdf5_dataset_filename": [
+      "picaso_results_5M.h5"
+    ],
+    "dataset_splits_filename": "dataset_splits.json",
+    "dataset_split_fractions": {
+      "train": 0.7,
+      "validation": 0.15,
+      "test": 0.15
+    }
+  },
+  "data_specification": {
+    "input_variables": [
+      "pressure_bar",
+      "temperature_k"
+    ],
+    "global_variables": [
+      "orbital_distance_m"
+    ],
+    "target_variables": [
+      "net_thermal_flux",
+      "net_reflected_flux"
+    ],
+    "strictly_positive_variables": [
+      "pressure_bar",
+      "temperature_k",
+      "orbital_distance_m"
+    ],
+    "variable_units": {
+      "pressure_bar": "bar",
+      "temperature_k": "K",
+      "orbital_distance_m": "m",
+      "net_thermal_flux": "erg cm^-2 s^-1",
+      "net_reflected_flux": "erg cm^-2 s^-1"
+    },
+    "padding_value": -9999.0
+  },
+  "normalization": {
+    "key_methods": {
+      "pressure_bar": "log-min-max",
+      "temperature_k": "standard",
+      "orbital_distance_m": "log-standard",
+      // symlog on the flux channels (paper convention). signed-log was tried
+      // in the May-2026 sweep but compresses small |x| values indistinguishably
+      // from zero, washing out the low-flux tail in predictions.
+      "net_thermal_flux": "symlog",
+      "net_reflected_flux": "symlog"
+    },
+    "epsilon": 1e-9,
+    "padding_comparison_epsilon": 1e-6,
+    "normalized_value_clamp": 50.0,
+    "log_min_max_clamp_min": 0.0,
+    "log_min_max_clamp_max": 1.0,
+    "symlog_min_threshold_multiplier": 100.0,
+    "stats_max_block_bytes": 536870912,
+    "stats_max_span_multiplier": 16,
+    "stats_chunk_size": 4096,
+    "quantile_max_values_in_memory": 100000,
+    "symlog_percentile": 0.01
+  },
+  "precision": {
+    "input_dtype": "float32",
+    "stats_accumulation_dtype": "float32",
+    "model_dtype": "float32",
+    "forward_dtype": "float32",
+    "loss_dtype": "float32",
+    "optimizer_state_dtype": "float32",
+    // Inert when use_amp=false but kept for schema compatibility.
+    "amp_autocast_dtype": "bfloat16",
+    "float32_matmul_precision": "high"
+  },
+  "model_hyperparameters": {
+    "model_type": "transformer",
+    "d_model": 512,
+    "dropout": 0.0,
+    // Paper value (SAFE_PAPER_VERSION/config/config.jsonc:70). The v3 file
+    // used 1000 but mis-attributed it to the paper.
+    "film_clamp": 10.0,
+    "max_sequence_length": 75,
+    "output_head_divisor": 2,
+    "output_head_dropout_factor": 0.0,
+    // Activation in the 2-linear output projection head. Paper default "gelu".
+    "head_activation": "gelu",
+    "transformer": {
+      "nhead": 4,
+      "num_layers": 3,
+      "dim_feedforward": 2048,
+      "attention_dropout": 0.0,
+      // Disabled vs v3. QK-Norm (Henry et al. 2020) is a modern stability
+      // tweak that was not in the paper transformer.
+      "use_qk_norm": false,
+      // Bias on Q/K/V/out projections; modern practice keeps these on for
+      // small models. Set false to drop them.
+      "qkv_bias": true,
+      // FFN variant: "gelu" = Linear-GELU-Linear (original),
+      // "swiglu" = LLaMA/PaLM-style gated FFN. Paper default is gelu.
+      "ffn_type": "gelu"
+    },
+    "lstm": {
+      "num_layers": 3,
+      "bidirectional": true
+    }
+  },
+  "training_hyperparameters": {
+    "epochs": 300,
+    "batch_size": 256,
+    "learning_rate": 0.0001,
+    "weight_decay": 1e-5,
+    "optimizer": "adamw",
+    // PyTorch defaults (paper). v3 used 0.95 (LLaMA convention).
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "gradient_clip_val": 2.0,
+    // Available schedulers: "cosine", "plateau"
+    "scheduler_type": "cosine",
+    "min_lr": 1e-08,
+    "warmup_epochs": 10,
+    "warmup_start_factor": 0.1,
+    // Warmup granularity: "epoch" (legacy, one LR step per epoch) or "step"
+    // (per optimizer step — smoother, modern default).
+    "warmup_unit": "step",
+    "plateau_patience": 10,
+    "plateau_factor": 0.5,
+    "plateau_threshold": 1e-05,
+    // Available threshold modes: "abs", "rel"
+    "plateau_threshold_mode": "abs",
+    // Effectively off (paper used 99999). v3 used 100 and best_epoch=81/300
+    // suggests the low-flux tail had not finished converging.
+    "early_stopping_patience": 99999,
+    "min_delta": 1e-05,
+    // Disabled vs v3 to avoid bfloat16 weight-quantization bias at low fluxes.
+    "use_amp": false,
+    // Disabled vs v3. EMA weights are loaded at inference (train.py:1122-1126)
+    // and were a likely source of the low-flux lag in the v3 model.
+    "ema_decay": 0,
+    "dataset_fraction_to_use": 1.0
+  },
+  "loss": {
+    // Pure MSE in normalized space.
+    //       L = masked_mean((pred_z - true_z)^2)
+    // Implemented inside signed_log_adaptive by setting lambda_phys=0 so the
+    // physical fractional-L1 term is dropped entirely. If lambda_phys > 0:
+    //       L_phys = abs(pred_phys - true_phys) / sqrt(true_phys^2 + epsilon)
+    "type": "signed_log_adaptive",
+    "lambda_z": 1.0,
+    "lambda_phys": 0.0,
+    // Denominator floor in target-physical units squared (erg cm^-2 s^-1)^2.
+    "fractional_epsilon": 1.0,
+    // p_norm is retained as a compatibility guard; only L1 (1) is supported.
+    "p_norm": 1,
+    // Legacy weight fields are ignored by the current fractional-L1 loss.
+    "weight_mode": "uniform",
+    "weight_power": 0.0,
+    "w_min": 1.0,
+    "w_max": 1.0
+  },
+  "output_paths_config": {
+    "fixed_model_foldername": "transformer_main"
+  }
+}

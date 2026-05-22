@@ -109,8 +109,8 @@
     "forward_dtype": "float32",
     "loss_dtype": "float32",
     "optimizer_state_dtype": "float32",
-    // Inert when use_amp=false but kept for schema compatibility.
-    "amp_autocast_dtype": "bfloat16",
+    // Validator requires "none" when use_amp=false.
+    "amp_autocast_dtype": "none",
     "float32_matmul_precision": "high"
   },
   "model_hyperparameters": {

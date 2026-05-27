@@ -31,13 +31,12 @@
 #     REBUILD_PROCESSED=1 is set explicitly.
 #
 # By default this trains both production models in sequence:
-#   1. transformer_main_v4.jsonc — ~9.6M params; AMP/EMA/QK-Norm disabled,
-#      film_clamp=10, AdamW betas (0.9, 0.999), early_stopping_patience=30.
-#   2. lstm_main_v4.jsonc        — ~9.73M params; matched training schedule.
-# Both use symlog flux normalization and the same training schedule. v4 turns
-# off the modernizations (AMP, EMA, QK-Norm, etc.) that v3 introduced and which
-# correlate with the low-pressure signed-mean bias in
-# Paper_Work/audit_2026-05-08.md:43.
+#   1. transformer_main_v5.jsonc — ~8.0M params; d_model=256, 6-layer encoder,
+#      gelu FFN, sweep-informed architecture.
+#   2. lstm_main_v5.jsonc        — ~8.0M params; d_model=464, 2-layer biLSTM,
+#      matched parameter count for apples-to-apples comparison.
+# Both use symlog flux normalization, pure float32, no EMA, no AMP, and an
+# identical training schedule.
 # Models in CONFIG_NAMES train sequentially in the listed order, sharing the
 # processed data cache.
 #
@@ -57,8 +56,8 @@
 #     SKIP_MERGE=1 sbatch Problemulator/supercomputer_cmds/train.sh             # skip the merge step entirely
 #     SKIP_MERGE=0 sbatch Problemulator/supercomputer_cmds/train.sh             # always run the merge freshness check
 #     REBUILD_PROCESSED=1 sbatch Problemulator/supercomputer_cmds/train.sh      # force a full preprocessing rebuild
-#     CONFIG_NAMES="lstm_main_v4" sbatch Problemulator/supercomputer_cmds/train.sh                          # LSTM only
-#     CONFIG_NAMES="transformer_main_v4" sbatch Problemulator/supercomputer_cmds/train.sh                   # transformer only
+#     CONFIG_NAMES="lstm_main_v5" sbatch Problemulator/supercomputer_cmds/train.sh                          # LSTM only
+#     CONFIG_NAMES="transformer_main_v5" sbatch Problemulator/supercomputer_cmds/train.sh                   # transformer only
 
 set -euo pipefail
 
@@ -96,8 +95,8 @@ REBUILD_PROCESSED="${REBUILD_PROCESSED:-0}"
 SKIP_MERGE="${SKIP_MERGE:-auto}"
 # Space-separated list of config stems under config/<name>.jsonc.
 # Models train sequentially in the listed order; the first one that fails
-# stops the job (set -e). Override with CONFIG_NAMES="lstm_main_v4" etc.
-CONFIG_NAMES="${CONFIG_NAMES:-transformer_main_v4 lstm_main_v4}"
+# stops the job (set -e). Override with CONFIG_NAMES="lstm_main_v5" etc.
+CONFIG_NAMES="${CONFIG_NAMES:-transformer_main_v5 lstm_main_v5}"
 
 MERGED_PATH="$PROJECT_ROOT/gen_data/output/$MERGED_NAME"
 TRAIN_RAW_DIR="$PROBLEMULATOR_ROOT/data/raw"

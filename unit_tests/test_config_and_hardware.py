@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Unit tests for config validation and explicit backend behavior."""
 
 from __future__ import annotations

@@ -29,6 +29,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from utils import get_precision_config, validate_config
+
 
 HEAD_ACTIVATIONS: Dict[str, type] = {
     "gelu": nn.GELU,
@@ -45,8 +47,6 @@ def make_head_activation(name: str) -> nn.Module:
             f"head_activation must be one of {sorted(HEAD_ACTIVATIONS)} (got {name!r})."
         )
     return HEAD_ACTIVATIONS[key]()
-
-from utils import get_precision_config, validate_config
 
 logger = logging.getLogger(__name__)
 
@@ -713,9 +713,9 @@ def create_prediction_model(
             num_encoder_layers=int(transformer_params["num_layers"]),
             dim_feedforward=int(transformer_params["dim_feedforward"]),
             attention_dropout=float(transformer_params["attention_dropout"]),
-            use_qk_norm=bool(transformer_params.get("use_qk_norm", False)),
-            qkv_bias=bool(transformer_params.get("qkv_bias", True)),
-            ffn_type=str(transformer_params.get("ffn_type", "gelu")).lower(),
+            use_qk_norm=bool(transformer_params["use_qk_norm"]),
+            qkv_bias=bool(transformer_params["qkv_bias"]),
+            ffn_type=str(transformer_params["ffn_type"]).lower(),
             **common_kwargs,
         )
     elif model_type == "lstm":

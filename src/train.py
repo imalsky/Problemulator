@@ -540,8 +540,8 @@ class ModelTrainer:
         opt_name = str(tp["optimizer"]).lower()
         lr = float(tp["learning_rate"])
         wd = float(tp["weight_decay"])
-        beta1 = float(tp.get("adam_beta1", 0.9))
-        beta2 = float(tp.get("adam_beta2", 0.999))
+        beta1 = float(tp["adam_beta1"])
+        beta2 = float(tp["adam_beta2"])
 
         # Separate parameters for weight decay
         decay, no_decay = [], []
@@ -584,7 +584,7 @@ class ModelTrainer:
             raise ValueError("warmup_epochs must be less than total epochs.")
         warmup_start_factor = float(tp["warmup_start_factor"])
         min_lr = float(tp["min_lr"])
-        warmup_unit = str(tp.get("warmup_unit", "epoch")).lower()
+        warmup_unit = str(tp["warmup_unit"]).lower()
         steps_per_epoch = len(self.train_loader)
         if steps_per_epoch <= 0:
             raise RuntimeError("Training loader is empty; cannot build scheduler.")
@@ -653,7 +653,7 @@ class ModelTrainer:
         self.early_stopping_min_delta = float(tp["min_delta"])
 
         # Optional EMA of model weights. ``ema_decay <= 0`` disables it.
-        ema_decay = float(tp.get("ema_decay", 0.0))
+        ema_decay = float(tp["ema_decay"])
         if ema_decay > 0.0:
             self.ema = ModelEMA(self.model, ema_decay)
             logger.info("EMA enabled with decay=%.4f.", ema_decay)

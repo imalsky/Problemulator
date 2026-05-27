@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Unit tests for padding masks and the simplified model contracts."""
 
 from __future__ import annotations

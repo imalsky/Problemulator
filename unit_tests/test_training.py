@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Unit tests for training-loop logging and validation-control behavior."""
 
 from __future__ import annotations

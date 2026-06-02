@@ -4,7 +4,7 @@
 #SBATCH -e rt_train_one.e%j
 #SBATCH -p gpu
 #SBATCH --mem=60G
-#SBATCH -t 48:00:00
+#SBATCH -t 72:00:00
 #SBATCH --gpus=1
 #SBATCH --clusters=edge
 #SBATCH -N 1
@@ -16,8 +16,8 @@
 # Train EXACTLY ONE model config on ONE GPU. Use this to run several models as
 # independent, parallel jobs (one each) — e.g. the matched v6 pair:
 #
-#     CONFIG_NAME=transformer_main_v6 sbatch -J tfm_v6  supercomputer_cmds/train_one.sh
-#     CONFIG_NAME=lstm_main_v6        sbatch -J lstm_v6 supercomputer_cmds/train_one.sh
+#     CONFIG_NAME=transformer_main_v7 sbatch -J tfm_v7  supercomputer_cmds/train_one.sh
+#     CONFIG_NAME=lstm_main_v7        sbatch -J lstm_v7 supercomputer_cmds/train_one.sh
 #
 # WHY a separate script (vs train.sh):
 #   train.sh bundles merge -> stage -> (optional) preprocess -> train in one job

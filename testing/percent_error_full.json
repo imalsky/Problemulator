@@ -1,5 +1,15 @@
 {
-  "transformer": {
+  "meta": {
+    "model_dir": "models/transformer_main",
+    "n_profiles_evaluated": 750000,
+    "n_profiles_total": 750000,
+    "full_test_set": true,
+    "epsilon_denominator_floor": 1.0,
+    "abs_pct_def": "100*|pred-true|/max(|true|,eps)",
+    "signed_pct_def": "100*(pred-true)/max(true,eps)  [manuscript Eq.]",
+    "device": "mps"
+  },
+  "channels": {
     "net_thermal_flux": {
       "n_points": 56250000,
       "mae": 833903.2690533686,
@@ -27,34 +37,6 @@
       "abs_pct_p95": 2.6098825931549072,
       "signed_pct_median": 4.176033030489634e-08,
       "signed_pct_mean": 3107690.5
-    }
-  },
-  "lstm": {
-    "net_thermal_flux": {
-      "n_points": 768000,
-      "mae": 723754.3125,
-      "rmse": 2875664.75,
-      "bias": -237035.734375,
-      "r2": 0.999978169444086
-    },
-    "net_reflected_flux": {
-      "n_points": 768000,
-      "mae": 63067.00390625,
-      "rmse": 195419.140625,
-      "bias": -10528.896484375,
-      "r2": 0.9999778402886396
-    }
-  },
-  "_meta": {
-    "transformer_percent_error": {
-      "model_dir": "models/transformer_main",
-      "n_profiles_evaluated": 750000,
-      "n_profiles_total": 750000,
-      "full_test_set": true,
-      "epsilon_denominator_floor": 1.0,
-      "abs_pct_def": "100*|pred-true|/max(|true|,eps)",
-      "signed_pct_def": "100*(pred-true)/max(true,eps)  [manuscript Eq.]",
-      "device": "mps"
     }
   }
 }

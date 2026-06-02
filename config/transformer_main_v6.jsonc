@@ -1,0 +1,187 @@
+{
+  // v6 — regularized, sweep-frontier transformer aimed at beating the LSTM
+  // baseline at a matched ~8M parameter budget on a 2M-sample subset.
+  //
+  // WHY v6 (vs v5, which lost to lstm_main at full scale):
+  //   The v5 transformer reached a LOWER train loss but a HIGHER val/test loss
+  //   than the LSTM (val/train gap ~5.1x vs the LSTM's ~3.2x) — it overfit.
+  //   v5 ran with zero dropout, weight_decay=1e-5, and no EMA. Halving the data
+  //   to ~2M samples makes overfitting WORSE, so v6's whole thesis is:
+  //   align the architecture to the tuning Pareto frontier AND actually
+  //   regularize.
+  //
+  // ARCHITECTURE CHANGES vs v5 (d_model held at 256):
+  //   - num_layers:      6 -> 7   (the sweep frontier favors depth at d=256;
+  //                                 trials 43/59 — the best transformers — used
+  //                                 5-7 layers).
+  //   - dim_feedforward: 2048 -> 1124  (4.4x ratio, not 8x. The sweep's best
+  //                                 trials used FFN=1024; the 8x FFN in v5 added
+  //                                 capacity = overfitting without an accuracy
+  //                                 win. 1124 is tuned to hit ~8M params with
+  //                                 SwiGLU so it matches lstm_main_v6 to 0.08%.)
+  //   - ffn_type:        gelu -> swiglu  (the single best sweep trial, #59, used
+  //                                 SwiGLU; gated FFN is the modern default).
+  //   - use_qk_norm:     false -> true   (QK-LayerNorm stabilizes the deeper
+  //                                 7-layer stack; cheap, untested in the sweep
+  //                                 but a safe modern default).
+  //
+  // REGULARIZATION / TRAINING CHANGES vs v5 (shared verbatim with lstm_main_v6
+  // for a level-field comparison):
+  //   - dropout:                0.0 -> 0.1
+  //   - weight_decay:           1e-5 -> 1e-4
+  //   - ema_decay:              0 -> 0.999   (validation + saved weights use the
+  //                                 EMA copy; smooths the noisy val curve).
+  //   - dataset_fraction_to_use: 1.0 -> 0.40 (2M of 5M total: 1.4M train /
+  //                                 300k val / 300k test, same seed -> identical
+  //                                 subset for both models).
+  //
+  // Param count: d=256, 7 layers, FFN=1124, SwiGLU, QK-norm -> 7,987,578
+  //   (lstm_main_v6 = 7,993,794; matched within 0.08%).
+  // Everything not listed above is unchanged from v5: pure float32, no AMP,
+  // AdamW + cosine, 10-epoch step warmup, grad-clip 2.0, symlog flux targets.
+  "miscellaneous_settings": {
+    "random_seed": 42,
+    "num_workers": 1,
+    "detect_anomaly": false,
+    "shard_size": 10000,
+    "hdf5_read_chunk_size": 8192,
+    "device_backend": "cuda",
+    "torch_compile": false,
+    "compile_mode": "default",
+    "execution_mode": "train",
+    "rebuild_processed_data": false,
+    "dataset_loading_mode": "auto",
+    "dataset_max_cached_shards": 200,
+    "dataset_large_shard_mmap_bytes": 52428800,
+    "dataset_ram_safety_fraction": 0.8,
+    "dataset_copy_mmap_slices": true
+  },
+  "data_paths_config": {
+    "hdf5_dataset_filename": [
+      "picaso_results_5M.h5"
+    ],
+    "dataset_splits_filename": "dataset_splits.json",
+    "dataset_split_fractions": {
+      "train": 0.7,
+      "validation": 0.15,
+      "test": 0.15
+    }
+  },
+  "data_specification": {
+    "input_variables": [
+      "pressure_bar",
+      "temperature_k"
+    ],
+    "global_variables": [
+      "orbital_distance_m"
+    ],
+    "target_variables": [
+      "net_thermal_flux",
+      "net_reflected_flux"
+    ],
+    "strictly_positive_variables": [
+      "pressure_bar",
+      "temperature_k",
+      "orbital_distance_m"
+    ],
+    "variable_units": {
+      "pressure_bar": "bar",
+      "temperature_k": "K",
+      "orbital_distance_m": "m",
+      "net_thermal_flux": "erg cm^-2 s^-1",
+      "net_reflected_flux": "erg cm^-2 s^-1"
+    },
+    "padding_value": -9999.0
+  },
+  "normalization": {
+    "key_methods": {
+      "pressure_bar": "log-min-max",
+      "temperature_k": "standard",
+      "orbital_distance_m": "log-standard",
+      "net_thermal_flux": "symlog",
+      "net_reflected_flux": "symlog"
+    },
+    "epsilon": 1e-9,
+    "padding_comparison_epsilon": 1e-6,
+    "normalized_value_clamp": 50.0,
+    "log_min_max_clamp_min": 0.0,
+    "log_min_max_clamp_max": 1.0,
+    "symlog_min_threshold_multiplier": 100.0,
+    "stats_max_block_bytes": 536870912,
+    "stats_max_span_multiplier": 16,
+    "stats_chunk_size": 4096,
+    "quantile_max_values_in_memory": 100000,
+    "symlog_percentile": 0.01
+  },
+  "precision": {
+    "input_dtype": "float32",
+    "stats_accumulation_dtype": "float32",
+    "model_dtype": "float32",
+    "forward_dtype": "float32",
+    "loss_dtype": "float32",
+    "optimizer_state_dtype": "float32",
+    "amp_autocast_dtype": "none",
+    "float32_matmul_precision": "high"
+  },
+  "model_hyperparameters": {
+    "model_type": "transformer",
+    "d_model": 256,
+    "dropout": 0.1,
+    "film_clamp": 10.0,
+    "max_sequence_length": 75,
+    "output_head_divisor": 1,
+    "output_head_dropout_factor": 0.0,
+    "head_activation": "gelu",
+    "transformer": {
+      "nhead": 4,
+      "num_layers": 7,
+      "dim_feedforward": 1124,
+      "attention_dropout": 0.0,
+      "use_qk_norm": true,
+      "qkv_bias": true,
+      "ffn_type": "swiglu"
+    },
+    "lstm": {
+      "num_layers": 2,
+      "bidirectional": true
+    }
+  },
+  "training_hyperparameters": {
+    "epochs": 200,
+    "batch_size": 256,
+    "learning_rate": 0.0001,
+    "weight_decay": 1e-4,
+    "optimizer": "adamw",
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "gradient_clip_val": 2.0,
+    "scheduler_type": "cosine",
+    "min_lr": 1e-08,
+    "warmup_epochs": 10,
+    "warmup_start_factor": 0.1,
+    "warmup_unit": "step",
+    "plateau_patience": 10,
+    "plateau_factor": 0.5,
+    "plateau_threshold": 1e-05,
+    "plateau_threshold_mode": "abs",
+    "early_stopping_patience": 30,
+    "min_delta": 1e-10,
+    "use_amp": false,
+    "ema_decay": 0.999,
+    "dataset_fraction_to_use": 0.40
+  },
+  "loss": {
+    "type": "signed_log_adaptive",
+    "lambda_z": 1.0,
+    "lambda_phys": 0.0,
+    "fractional_epsilon": 1.0,
+    "p_norm": 1,
+    "weight_mode": "uniform",
+    "weight_power": 0.0,
+    "w_min": 1.0,
+    "w_max": 1.0
+  },
+  "output_paths_config": {
+    "fixed_model_foldername": "transformer_main_v6"
+  }
+}

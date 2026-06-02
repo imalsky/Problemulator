@@ -1,21 +1,21 @@
 {
   "transformer": {
-    "params": 9600770,
-    "test_loss": 6.230348844837863e-06,
+    "params": 7965698,
+    "test_loss": 6.324045898509212e-06,
     "best_epoch": 200,
-    "val_at_best": 6.389634e-06,
-    "train_hours_total": 21.28122222222222,
+    "val_at_best": 6.219298e-06,
+    "train_hours_total": 24.65030555555556,
     "epochs_completed": 200,
-    "throughput_b256_samples_per_s": 568.2569169859015
+    "throughput_b256_samples_per_s": 501.0431112802161
   },
   "lstm": {
-    "params": 9730050,
-    "test_loss": 4.731630724563729e-06,
+    "params": 7993794,
+    "test_loss": 4.415746388986008e-06,
     "best_epoch": 197,
-    "val_at_best": 4.668665e-06,
-    "train_hours_total": 22.11088888888889,
+    "val_at_best": 4.415209e-06,
+    "train_hours_total": 20.84738888888889,
     "epochs_completed": 200,
-    "throughput_b256_samples_per_s": 409.9715872266259
+    "throughput_b256_samples_per_s": 464.5518789218113
   },
   "tuning": {
     "study_name": "rt_tune_20260521_084622",

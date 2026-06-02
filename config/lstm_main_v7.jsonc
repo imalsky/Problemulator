@@ -7,18 +7,17 @@
   // Architecture is the proven full-scale winner (models/lstm_main: d_model=464,
   // 2-layer bidirectional LSTM, 7,993,794 params; matches transformer_main_v7's
   // 7,965,698 within 0.35%). Training knobs are byte-for-byte identical to
-  // transformer_main_v7 except the architecture itself: dropout=0,
+  // transformer_main_v7 except the architecture itself: dropout=0.05,
   // weight_decay=1e-5, EMA off, 300-epoch cosine, early-stop patience=30 /
   // min_delta=1e-10.
   //
-  // CAVEAT — dropout=0 is the setting that won at FULL 5M scale, where it does
-  // NOT overfit (lstm_main rode to epoch 197/200). On only 2M profiles expect
-  // this LSTM to overfit and early-stop: v6 already overfit here (best val at
-  // epoch 17, stopped at 47) WITH more regularization (dropout 0.1 + EMA +
-  // wd 1e-4). With dropout=0 it will overfit sooner/harder. If the goal is a
-  // FAIR small-data comparison rather than the proven full-scale knobs, add
-  // matched regularization to both configs (and likely heavier regularization
-  // for the LSTM specifically — its dropout acts at only one inter-layer site).
+  // NOTE — dropout=0.05 (light) is added on BOTH sides for the 2M regime; the
+  // winning full-scale runs used dropout=0, which is only justified at 5M. 0.05
+  // is modest, and for a 2-layer LSTM it acts at a single inter-layer site, so
+  // this LSTM may still overfit / early-stop at 2M (v6 overfit here even with
+  // dropout 0.1 + EMA + wd 1e-4). Watch the val curve; if it still diverges,
+  // raise the LSTM dropout further or trim its capacity. The min-val checkpoint
+  // (best_model) is what test() reloads, so the reported model is the best epoch.
   //
   // Preprocessing-relevant fields (data_specification, normalization, precision,
   // splits, raw file) are unchanged, so main.py reuses the existing
@@ -110,7 +109,7 @@
   "model_hyperparameters": {
     "model_type": "lstm",
     "d_model": 464,
-    "dropout": 0.0,
+    "dropout": 0.05,
     "film_clamp": 10.0,
     "max_sequence_length": 75,
     "output_head_divisor": 1,

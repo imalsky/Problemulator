@@ -7,16 +7,15 @@
   // d_model=256, 6 layers, FFN=2048, GELU, QK-norm off, 7,965,698 params;
   // matches lstm_main_v7's 7,993,794 within 0.35%). Training knobs are
   // byte-for-byte identical to lstm_main_v7 except the architecture itself:
-  // dropout=0, weight_decay=1e-5, EMA off, 300-epoch cosine, early-stop
+  // dropout=0.05, weight_decay=1e-5, EMA off, 300-epoch cosine, early-stop
   // patience=30 / min_delta=1e-10.
   //
-  // CAVEAT — dropout=0 is the FULL-5M-tuned setting (no overfitting at full
-  // scale). On 2M the transformer is more robust to it than the LSTM, so a
-  // transformer win here is partly a regularization-asymmetry artifact: at small
-  // data the LSTM needs regularization that the transformer's many dropout sites
-  // would supply for free. For a fair 2M comparison add matched regularization
-  // to both configs. The min-val checkpoint (best_model) is what test() reloads,
-  // so even if it overfits late the reported model is the best epoch.
+  // NOTE — dropout=0.05 (light) is added on BOTH sides for the 2M regime; the
+  // winning full-scale runs used dropout=0 (justified only at 5M). 0.05
+  // regularizes the 6-layer transformer at many sites but the 2-layer LSTM at
+  // only one, so the symmetric value still tilts toward the transformer at small
+  // data; to put them on equal footing, give the LSTM more dropout than this.
+  // The min-val checkpoint (best_model) is what test() reloads.
   //
   // Preprocessing-relevant fields are unchanged, so main.py reuses the existing
   // data/processed cache read-only — NO rebuild, safe to run in parallel with
@@ -108,7 +107,7 @@
   "model_hyperparameters": {
     "model_type": "transformer",
     "d_model": 256,
-    "dropout": 0.0,
+    "dropout": 0.05,
     "film_clamp": 10.0,
     "max_sequence_length": 75,
     "output_head_divisor": 1,

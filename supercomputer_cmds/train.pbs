@@ -1,0 +1,209 @@
+#!/bin/bash
+#PBS -N rt_train
+#PBS -j oe
+#PBS -o rt_train.o${PBS_JOBID}
+#PBS -q gpu
+#PBS -l select=1:ncpus=8:mem=60gb:ngpus=1
+#PBS -l walltime=72:00:00
+#PBS -m abe
+#PBS -M isaac.n.malsky@jpl.nasa.gov
+
+# PBS training launcher: trains ONE model on ONE GPU. Submit it once per model;
+# the jobs run in parallel (each gets its own GPU) under the scheduler. Built for
+# the transformer_final vs lstm_final head-to-head with the data already uploaded
+# (no shard-merge step).
+#
+#   qsub -v CONFIG_NAME=transformer_final Problemulator/supercomputer_cmds/train.pbs
+#   qsub -v CONFIG_NAME=lstm_final        Problemulator/supercomputer_cmds/train.pbs
+#
+# (CONFIG_NAME defaults to transformer_final if you omit -v.)
+#
+# Parallel-safe cache build: main.py builds data/processed/ on demand even with
+# rebuild_processed_data=false, so two jobs starting against an empty cache would
+# race two writers into the same directory. This script guards the build with an
+# atomic mkdir lock -- whichever job starts first builds the cache (serially, on
+# CPU); the other waits for it, then both only READ the cache. So you can submit
+# both jobs at once and not worry about ordering.
+#
+# Live logs: PBS only copies its -o file back when the job ENDS. Instead the
+# training streams unbuffered (python -u) into logs/train_<jobid>/ on the shared
+# filesystem, so you can watch progress while it runs:
+#     tail -f Problemulator/logs/train_<jobid>/<config>.log
+#
+# Optional overrides (PBS passes env through -v):
+#     qsub -v CONFIG_NAME=lstm_final ...
+#     qsub -v CONFIG_NAME=transformer_final,REBUILD_PROCESSED=1 ...   # force-rebuild cache
+#     qsub -v TRAIN_RAW_NAME=picaso_results_5M.h5 ...
+#     qsub -v CONDA_ENV=nn ...
+#
+# REBUILD_PROCESSED=1 is meant for a single run; don't set it on two jobs you
+# launch at the same time (only the lock-holder rebuilds, but it's cleaner to
+# rebuild once, then submit the trainings).
+
+set -euo pipefail
+
+resolve_problemulator_root() {
+    local start_dir="$1"
+    if [[ -d "$start_dir/src" && -d "$start_dir/config" ]]; then
+        cd "$start_dir" && pwd
+    elif [[ -d "$start_dir/Problemulator/src" && -d "$start_dir/Problemulator/config" ]]; then
+        cd "$start_dir/Problemulator" && pwd
+    elif [[ -d "$start_dir/../src" && -d "$start_dir/../config" ]]; then
+        cd "$start_dir/.." && pwd
+    elif [[ -d "$start_dir/../Problemulator/src" && -d "$start_dir/../Problemulator/config" ]]; then
+        cd "$start_dir/../Problemulator" && pwd
+    else
+        echo "Could not resolve Problemulator root from: $start_dir" >&2
+        return 1
+    fi
+}
+
+# PBS sets PBS_O_WORKDIR to the directory from which qsub was invoked.
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+    PROBLEMULATOR_ROOT="$(resolve_problemulator_root "$PBS_O_WORKDIR")"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROBLEMULATOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
+PROJECT_ROOT="$(cd "$PROBLEMULATOR_ROOT/.." && pwd)"
+cd "$PROBLEMULATOR_ROOT"
+
+CONDA_ENV="${CONDA_ENV:-nn}"
+MERGED_NAME="${MERGED_NAME:-picaso_results_5M.h5}"
+TRAIN_RAW_NAME="${TRAIN_RAW_NAME:-$MERGED_NAME}"
+REBUILD_PROCESSED="${REBUILD_PROCESSED:-0}"
+# The single config stem under config/<name>.jsonc to train in this job.
+CONFIG_NAME="${CONFIG_NAME:-transformer_final}"
+
+CONFIG_PATH="$PROBLEMULATOR_ROOT/config/${CONFIG_NAME}.jsonc"
+TRAIN_RAW_PATH="$PROBLEMULATOR_ROOT/data/raw/$TRAIN_RAW_NAME"
+PROCESSED_DIR="$PROBLEMULATOR_ROOT/data/processed"
+CACHE_MARKER="$PROCESSED_DIR/normalization_metadata.json"
+BUILD_LOCK="$PROBLEMULATOR_ROOT/data/.processed_build.lock"
+
+# Live log directory on the shared filesystem (NOT the PBS spool, which is only
+# flushed at job end). One subdir per job so concurrent runs don't clobber.
+JOB_TAG="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_TAG="${JOB_TAG//\//_}"   # sanitize any '/' in the jobid
+LOG_DIR="$PROBLEMULATOR_ROOT/logs/train_${JOB_TAG}"
+mkdir -p "$LOG_DIR"
+
+# Mirror this script's own output (preflight/cache/launch banners) into the log
+# dir, live. The training's own stdout is redirected to its own file below.
+exec > >(tee -a "$LOG_DIR/job.log") 2>&1
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# ----- Conda env -----
+CONDA_EXE="$(command -v conda || true)"
+if [[ -z "$CONDA_EXE" ]]; then
+    echo "Conda executable not found." >&2
+    exit 1
+fi
+CONDA_BASE="$(dirname "$(dirname "$CONDA_EXE")")"
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$CONDA_ENV" || { echo "Failed to activate Conda env '$CONDA_ENV'." >&2; exit 1; }
+
+# ----- CUDA module (best-effort, matches train.sh / tune.pbs) -----
+echo "Looking for available CUDA modules..."
+module avail cuda 2>&1 | grep -i cuda || echo "No CUDA modules found via module system"
+for cuda_version in cuda12.6/toolkit/12.6.3 cuda12.6/12.6 cuda11.8/toolkit/11.8.0 cuda/12.7 cuda/12.6 cuda/12.5 cuda/12.4 cuda/12.0 cuda/11.8 cuda/11.7 cuda; do
+    if module load "$cuda_version" 2>/dev/null; then
+        echo "Successfully loaded $cuda_version"
+        break
+    fi
+done
+
+# ----- Pre-flight: config + uploaded raw HDF5 -----
+if [[ ! -f "$CONFIG_PATH" ]]; then
+    echo "Training config not found: $CONFIG_PATH" >&2
+    exit 1
+fi
+if ! grep -q "\"$TRAIN_RAW_NAME\"" "$CONFIG_PATH"; then
+    echo "Config $CONFIG_PATH does not list \"$TRAIN_RAW_NAME\" in hdf5_dataset_filename." >&2
+    exit 1
+fi
+if [[ ! -f "$TRAIN_RAW_PATH" ]]; then
+    echo "Raw HDF5 missing: $TRAIN_RAW_PATH" >&2
+    echo "Upload your dataset to data/raw/$TRAIN_RAW_NAME before submitting." >&2
+    exit 1
+fi
+
+echo "------------------------------------------------"
+echo "Project root:        $PROJECT_ROOT"
+echo "Problemulator root:  $PROBLEMULATOR_ROOT"
+echo "Conda env:           $CONDA_ENV"
+echo "Config to train:     $CONFIG_NAME ($CONFIG_PATH)"
+echo "Raw HDF5:            $TRAIN_RAW_PATH"
+echo "Processed dir:       $PROCESSED_DIR"
+echo "Rebuild processed:   $REBUILD_PROCESSED"
+echo "Live logs:           $LOG_DIR"
+echo "GPU(s) visible:"
+nvidia-smi -L 2>/dev/null || echo "  (nvidia-smi unavailable)"
+echo "------------------------------------------------"
+
+# ----- Build the processed cache, lock-guarded so concurrent jobs don't race --
+build_cache() {
+    echo "=== [cache] Building data/processed/ (serial, CPU; rebuild=$REBUILD_PROCESSED) ==="
+    local tmp_cfg
+    tmp_cfg="$(mktemp -t rt_train_normalize_cfg.XXXXXX.json)"
+    python - "$CONFIG_PATH" "$tmp_cfg" "$REBUILD_PROCESSED" <<'PY'
+import json, sys
+sys.path.insert(0, "src")
+from utils import load_config
+src, dst, rebuild = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+cfg = load_config(src)
+cfg["miscellaneous_settings"]["execution_mode"] = "normalize"
+cfg["miscellaneous_settings"]["rebuild_processed_data"] = rebuild
+cfg["miscellaneous_settings"]["device_backend"] = "cpu"   # preprocessing is CPU-only
+cfg["training_hyperparameters"]["use_amp"] = False         # AMP needs cuda; off for cpu
+cfg["precision"]["amp_autocast_dtype"] = "none"            # validator: none when use_amp false
+with open(dst, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, indent=2)
+print(f"Wrote temp normalize config -> {dst} (rebuild={rebuild})")
+PY
+    python -u src/main.py --config "$tmp_cfg" 2>&1 | tee "$LOG_DIR/normalize.log"
+    rm -f "$tmp_cfg"
+}
+
+need_build=0
+if [[ "$REBUILD_PROCESSED" == "1" || ! -f "$CACHE_MARKER" ]]; then
+    need_build=1
+fi
+
+if [[ "$need_build" == "1" ]]; then
+    mkdir -p "$(dirname "$BUILD_LOCK")"
+    if mkdir "$BUILD_LOCK" 2>/dev/null; then
+        # We own the lock: build the cache, then release.
+        trap 'rmdir "$BUILD_LOCK" 2>/dev/null || true' EXIT
+        build_cache
+        rmdir "$BUILD_LOCK" 2>/dev/null || true
+        trap - EXIT
+        echo "=== [cache] Build complete ==="
+    else
+        echo "=== [cache] Another job holds the build lock; waiting for it ==="
+        waited=0
+        while [[ -d "$BUILD_LOCK" ]]; do
+            sleep 15; waited=$((waited + 15))
+            if [[ "$waited" -ge 3600 ]]; then
+                echo "Timed out (1h) waiting for the cache build lock at $BUILD_LOCK." >&2
+                echo "If a previous job was killed, clear it: rmdir '$BUILD_LOCK'" >&2
+                exit 1
+            fi
+        done
+        if [[ ! -f "$CACHE_MARKER" ]]; then
+            echo "Lock released but $CACHE_MARKER is missing; the building job likely failed." >&2
+            exit 1
+        fi
+        echo "=== [cache] Ready (built by the other job) ==="
+    fi
+else
+    echo "=== [cache] Reusing existing data/processed/ (main.py revalidates the fingerprint) ==="
+fi
+
+# ----- Train this one model on its single allocated GPU -----
+LOG="$LOG_DIR/${CONFIG_NAME}.log"
+echo "=== Training '$CONFIG_NAME' -> $LOG ==="
+echo "Watch with:  tail -f $LOG"
+python -u src/main.py --config "$CONFIG_PATH" > "$LOG" 2>&1
+echo "=== Finished '$CONFIG_NAME'; logs in $LOG_DIR ==="

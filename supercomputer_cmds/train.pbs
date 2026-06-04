@@ -1,12 +1,10 @@
 #!/bin/bash
 #PBS -N rt_train
+#PBS -q gpu_long
+#PBS -W group_list=s2458
+#PBS -l select=1:ncpus=72:ngpus=1:mem=400gb:model=gh200
+#PBS -l walltime=10:00:00
 #PBS -j oe
-#PBS -o rt_train.o${PBS_JOBID}
-#PBS -q gpu
-#PBS -l select=1:ncpus=8:mem=60gb:ngpus=1
-#PBS -l walltime=72:00:00
-#PBS -m abe
-#PBS -M isaac.n.malsky@jpl.nasa.gov
 
 # PBS training launcher: trains ONE model on ONE GPU. Submit it once per model;
 # the jobs run in parallel (each gets its own GPU) under the scheduler. Built for
@@ -93,26 +91,24 @@ mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_DIR/job.log") 2>&1
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export HDF5_USE_FILE_LOCKING=FALSE   # avoid HDF5 locking errors on the shared (Lustre) filesystem
 
-# ----- Conda env -----
-CONDA_EXE="$(command -v conda || true)"
-if [[ -z "$CONDA_EXE" ]]; then
-    echo "Conda executable not found." >&2
+# ----- Conda env (NAS GH200 module stack; PyTorch's aarch64 CUDA build bundles
+# its own runtime, so no separate cuda module is loaded) -----
+module purge 2>/dev/null || true
+module use -a /swbuild/analytix/tools/modulefiles 2>/dev/null || true
+module load miniconda3/gh2 2>/dev/null || true
+CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+if [[ -z "$CONDA_BASE" ]]; then
+    echo "conda not found after 'module load miniconda3/gh2'." >&2
     exit 1
 fi
-CONDA_BASE="$(dirname "$(dirname "$CONDA_EXE")")"
 source "$CONDA_BASE/etc/profile.d/conda.sh"
-conda activate "$CONDA_ENV" || { echo "Failed to activate Conda env '$CONDA_ENV'." >&2; exit 1; }
-
-# ----- CUDA module (best-effort, matches train.sh / tune.pbs) -----
-echo "Looking for available CUDA modules..."
-module avail cuda 2>&1 | grep -i cuda || echo "No CUDA modules found via module system"
-for cuda_version in cuda12.6/toolkit/12.6.3 cuda12.6/12.6 cuda11.8/toolkit/11.8.0 cuda/12.7 cuda/12.6 cuda/12.5 cuda/12.4 cuda/12.0 cuda/11.8 cuda/11.7 cuda; do
-    if module load "$cuda_version" 2>/dev/null; then
-        echo "Successfully loaded $cuda_version"
-        break
-    fi
-done
+conda activate "$CONDA_ENV" || {
+    echo "Failed to activate Conda env '$CONDA_ENV'. On the GH200 (aarch64) this" >&2
+    echo "must be an aarch64 PyTorch env; override with -v CONDA_ENV=<your env>." >&2
+    exit 1
+}
 
 # ----- Pre-flight: config + uploaded raw HDF5 -----
 if [[ ! -f "$CONFIG_PATH" ]]; then

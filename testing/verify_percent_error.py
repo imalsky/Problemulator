@@ -45,8 +45,10 @@ from torch.utils.data import DataLoader                         # noqa: E402
 MODEL_DIR = PROJECT_ROOT / "models" / "transformer_main"
 PROC_TEST = PROJECT_ROOT / "data" / "processed" / "test"
 NORM_META_PATH = PROJECT_ROOT / "data" / "processed" / "normalization_metadata.json"
-PER_CHANNEL_JSON = THIS_DIR / "per_channel_test_errors.json"
-PERCENT_JSON = THIS_DIR / "percent_error_full.json"
+OUTPUTS_DIR = THIS_DIR / "outputs"  # consolidated home for small JSON/CSV artifacts
+OUTPUTS_DIR.mkdir(exist_ok=True)
+PER_CHANNEL_JSON = OUTPUTS_DIR / "per_channel_test_errors.json"
+PERCENT_JSON = OUTPUTS_DIR / "percent_error_full.json"
 
 PCT_DENOM_FLOOR = 1.0  # epsilon = 1 erg cm^-2 s^-1, per the manuscript
 

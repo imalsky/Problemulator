@@ -1,0 +1,195 @@
+{
+  // transformer_final: the transformer side of the full-5M, matched-parameter
+  // head-to-head whose goal is to BEAT lstm_final at an equal parameter budget.
+  //
+  // Why the old transformer_main LOST to lstm_main (5M, ~8M params each):
+  //   - transformer_main fully converged (cosine annealed to 1e-8, val flat at
+  //     epoch 200) yet generalized worse: train 1.2e-6 vs val 6.3e-6
+  //     (val/train ~5.1, a large generalization gap), while lstm_main sat at
+  //     train 1.4e-6 / val 4.4e-6 (gap ~3.1) and won. The transformer's loss is
+  //     a GENERALIZATION gap, not undertraining -- so the fix is architecture +
+  //     regularization, not "train longer".
+  //   - transformer_main used the old stack: d256 / 6L / FFN2048 / GELU with
+  //     QK-norm OFF and no EMA. That stack overfits.
+  //
+  // What HELPS (evidence: the 64-trial Optuna sweep + the v8_fastwin win):
+  //   - use_qk_norm = true  -> the single biggest lever. Every strong sweep
+  //     transformer used it; the v8_fastwin transformer used it and did NOT
+  //     overfit (val ~= train). Stabilizes attention and tightens the gap.
+  //   - ffn_type = gelu     -> chosen FFN (per direction). Honest caveat: at
+  //     this d256/5L/FFN1024 scale the sweep's GELU trial (#53, 3.99M params,
+  //     val 3.334e-5) trailed the SwiGLU trial (#59, 5.31M, val 3.125e-5) -- but
+  //     #59 was also larger, so that gap is partly capacity. GELU is far cheaper
+  //     (2*d*F vs SwiGLU's 3*d*F).
+  //   - dropout = 0.0       -> ALL top-10 sweep transformers used dropout 0;
+  //     adding dropout HURTS here.
+  //   - EMA (0.999)         -> weight averaging improves generalization, which
+  //     is precisely the transformer's weak spot. (lstm_final uses it too, so
+  //     the comparison stays fair.)
+  //
+  // What is NEUTRAL / for speed:
+  //   - AMP bfloat16 autocast: requested for throughput on the cluster; weights,
+  //     targets, optimizer state, and loss reduction stay float32. bf16 needs no
+  //     loss scaling. Acts as a mild regulariser at worst.
+  //
+  // Architecture: the sweep-winning recipe at its NATIVE scale -- d_model=256,
+  // 5 layers, FFN=1024, GELU, QK-norm on, nhead=4, dropout 0. This is exactly
+  // the depth/width family of the best sweep trials (#59/#53, d256/5L/FFN1024),
+  // now run on full 5M data. Total budget ~4M params (down from 8M, per request);
+  // lstm_final is scaled to match.
+  //
+  // Parameter match (verified by instantiating create_prediction_model):
+  //   transformer_final: 4,024,322 params
+  //   lstm_final:        4,000,290 params   (+0.60%, "approx the same")
+  //
+  // Everything except architecture is identical to lstm_final: full 5M data,
+  // AMP bf16, EMA 0.999, dropout 0, the proven lstm_main schedule (lr 1e-4, wd
+  // 1e-5, AdamW betas 0.9/0.999, 10-epoch step-warmup, cosine to 1e-8, grad clip
+  // 2.0), run for the full annealed schedule. So the ONLY difference between the
+  // two finals is transformer-vs-LSTM.
+  "miscellaneous_settings": {
+    "random_seed": 42,
+    "num_workers": 1,
+    "detect_anomaly": false,
+    "shard_size": 10000,
+    "hdf5_read_chunk_size": 8192,
+    "device_backend": "cuda",
+    "torch_compile": false,
+    "compile_mode": "default",
+    "execution_mode": "train",
+    "rebuild_processed_data": false,
+    "dataset_loading_mode": "auto",
+    "dataset_max_cached_shards": 200,
+    "dataset_large_shard_mmap_bytes": 52428800,
+    "dataset_ram_safety_fraction": 0.8,
+    "dataset_copy_mmap_slices": true
+  },
+  "data_paths_config": {
+    "hdf5_dataset_filename": [
+      "picaso_results_5M.h5"
+    ],
+    "dataset_splits_filename": "dataset_splits.json",
+    "dataset_split_fractions": {
+      "train": 0.7,
+      "validation": 0.15,
+      "test": 0.15
+    }
+  },
+  "data_specification": {
+    "input_variables": [
+      "pressure_bar",
+      "temperature_k"
+    ],
+    "global_variables": [
+      "orbital_distance_m"
+    ],
+    "target_variables": [
+      "net_thermal_flux",
+      "net_reflected_flux"
+    ],
+    "strictly_positive_variables": [
+      "pressure_bar",
+      "temperature_k",
+      "orbital_distance_m"
+    ],
+    "variable_units": {
+      "pressure_bar": "bar",
+      "temperature_k": "K",
+      "orbital_distance_m": "m",
+      "net_thermal_flux": "erg cm^-2 s^-1",
+      "net_reflected_flux": "erg cm^-2 s^-1"
+    },
+    "padding_value": -9999.0
+  },
+  "normalization": {
+    "key_methods": {
+      "pressure_bar": "log-min-max",
+      "temperature_k": "standard",
+      "orbital_distance_m": "log-standard",
+      "net_thermal_flux": "symlog",
+      "net_reflected_flux": "symlog"
+    },
+    "epsilon": 1e-9,
+    "padding_comparison_epsilon": 1e-6,
+    "normalized_value_clamp": 50.0,
+    "log_min_max_clamp_min": 0.0,
+    "log_min_max_clamp_max": 1.0,
+    "symlog_min_threshold_multiplier": 100.0,
+    "stats_max_block_bytes": 536870912,
+    "stats_max_span_multiplier": 16,
+    "stats_chunk_size": 4096,
+    "quantile_max_values_in_memory": 100000,
+    "symlog_percentile": 0.01
+  },
+  "precision": {
+    "input_dtype": "float32",
+    "stats_accumulation_dtype": "float32",
+    "model_dtype": "float32",
+    "forward_dtype": "float32",
+    "loss_dtype": "float32",
+    "optimizer_state_dtype": "float32",
+    "amp_autocast_dtype": "bfloat16",
+    "float32_matmul_precision": "high"
+  },
+  "model_hyperparameters": {
+    "model_type": "transformer",
+    "d_model": 256,
+    "dropout": 0.0,
+    "film_clamp": 1000.0,
+    "max_sequence_length": 75,
+    "output_head_divisor": 1,
+    "output_head_dropout_factor": 0.0,
+    "head_activation": "gelu",
+    "transformer": {
+      "nhead": 4,
+      "num_layers": 5,
+      "dim_feedforward": 1024,
+      "attention_dropout": 0.0,
+      "use_qk_norm": true,
+      "qkv_bias": true,
+      "ffn_type": "gelu"
+    },
+    "lstm": {
+      "num_layers": 2,
+      "bidirectional": true
+    }
+  },
+  "training_hyperparameters": {
+    "epochs": 250,
+    "batch_size": 256,
+    "learning_rate": 0.0001,
+    "weight_decay": 1e-5,
+    "optimizer": "adamw",
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "gradient_clip_val": 2.0,
+    "scheduler_type": "cosine",
+    "min_lr": 1e-08,
+    "warmup_epochs": 10,
+    "warmup_start_factor": 0.1,
+    "warmup_unit": "step",
+    "plateau_patience": 10,
+    "plateau_factor": 0.5,
+    "plateau_threshold": 1e-05,
+    "plateau_threshold_mode": "abs",
+    "early_stopping_patience": 250,
+    "min_delta": 1e-10,
+    "use_amp": true,
+    "ema_decay": 0.999,
+    "dataset_fraction_to_use": 1.0
+  },
+  "loss": {
+    "type": "signed_log_adaptive",
+    "lambda_z": 1.0,
+    "lambda_phys": 0.0,
+    "fractional_epsilon": 1.0,
+    "p_norm": 1,
+    "weight_mode": "uniform",
+    "weight_power": 0.0,
+    "w_min": 1.0,
+    "w_max": 1.0
+  },
+  "output_paths_config": {
+    "fixed_model_foldername": "transformer_final"
+  }
+}

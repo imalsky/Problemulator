@@ -3,7 +3,7 @@
 #PBS -q gpu_long
 #PBS -W group_list=s2458
 #PBS -l select=1:ncpus=72:ngpus=1:mem=400gb:model=gh200
-#PBS -l walltime=10:00:00
+#PBS -l walltime=72:00:00
 #PBS -j oe
 
 # PBS training launcher: trains ONE model on ONE GPU. Submit it once per model;

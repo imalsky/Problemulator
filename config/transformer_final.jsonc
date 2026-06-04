@@ -43,13 +43,15 @@
   //   lstm_final:        4,000,290 params   (+0.60%, "approx the same")
   //
   // Everything except architecture is identical to lstm_final: full 5M data,
-  // AMP bf16, EMA 0.999, dropout 0, the proven lstm_main schedule (lr 1e-4, wd
-  // 1e-5, AdamW betas 0.9/0.999, 10-epoch step-warmup, cosine to 1e-8, grad clip
-  // 2.0), run for the full annealed schedule. So the ONLY difference between the
-  // two finals is transformer-vs-LSTM.
+  // AMP bf16, EMA 0.999, dropout 0, batch 1024 + num_workers=16 (to saturate the
+  // GH200, which sat at 55% util / 2.6GB-of-96GB at batch 256), wd 1e-5, AdamW
+  // betas 0.9/0.999, 10-epoch step-warmup, cosine to 1e-8 over 300 epochs with
+  // early stopping (patience 30, min_delta 1e-10). lr is 2e-4 -- sqrt-scaled up
+  // from the 1e-4 baseline for the 4x larger batch. So the ONLY difference
+  // between the two finals is transformer-vs-LSTM.
   "miscellaneous_settings": {
     "random_seed": 42,
-    "num_workers": 1,
+    "num_workers": 16,
     "detect_anomaly": false,
     "shard_size": 10000,
     "hdf5_read_chunk_size": 8192,
@@ -155,9 +157,9 @@
     }
   },
   "training_hyperparameters": {
-    "epochs": 250,
-    "batch_size": 256,
-    "learning_rate": 0.0001,
+    "epochs": 300,
+    "batch_size": 1024,
+    "learning_rate": 0.0002,
     "weight_decay": 1e-5,
     "optimizer": "adamw",
     "adam_beta1": 0.9,
@@ -172,7 +174,7 @@
     "plateau_factor": 0.5,
     "plateau_threshold": 1e-05,
     "plateau_threshold_mode": "abs",
-    "early_stopping_patience": 250,
+    "early_stopping_patience": 30,
     "min_delta": 1e-10,
     "use_amp": true,
     "ema_decay": 0.999,

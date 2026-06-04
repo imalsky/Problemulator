@@ -13,10 +13,12 @@
   //   - use_amp = true, bfloat16 autocast (requested; float32 weights/optimizer/
   //     loss preserved).
   //   - ema_decay = 0.999 (weight averaging; helps both models' generalization).
-  //   - epochs 200 -> 250 with early_stopping_patience = epochs, so the cosine
-  //     fully anneals (lstm_main's best epoch was its last; we never want to
-  //     stop before the LR has decayed to min_lr).
-  // Everything else is lstm_main's winning schedule verbatim: lr 1e-4, wd 1e-5,
+  //   - epochs 200 -> 300, cosine to 1e-8, early_stopping_patience=30
+  //     (min_delta 1e-10): reasonable early stop that won't cut a still-
+  //     improving run short.
+  //   - batch 256 -> 1024 + num_workers 1 -> 16 to saturate the GH200; lr
+  //     1e-4 -> 2e-4 (sqrt-scaled for the 4x batch).
+  // Everything else follows lstm_main's schedule: wd 1e-5,
   // AdamW betas 0.9/0.999, 10-epoch step-warmup (start factor 0.1), cosine to
   // 1e-8, grad clip 2.0, dropout 0, full 5M data.
   //
@@ -25,7 +27,7 @@
   //   transformer_final: 4,024,322 params   (+0.60%)
   "miscellaneous_settings": {
     "random_seed": 42,
-    "num_workers": 1,
+    "num_workers": 16,
     "detect_anomaly": false,
     "shard_size": 10000,
     "hdf5_read_chunk_size": 8192,
@@ -131,9 +133,9 @@
     }
   },
   "training_hyperparameters": {
-    "epochs": 250,
-    "batch_size": 256,
-    "learning_rate": 0.0001,
+    "epochs": 300,
+    "batch_size": 1024,
+    "learning_rate": 0.0002,
     "weight_decay": 1e-5,
     "optimizer": "adamw",
     "adam_beta1": 0.9,
@@ -148,7 +150,7 @@
     "plateau_factor": 0.5,
     "plateau_threshold": 1e-05,
     "plateau_threshold_mode": "abs",
-    "early_stopping_patience": 250,
+    "early_stopping_patience": 30,
     "min_delta": 1e-10,
     "use_amp": true,
     "ema_decay": 0.999,

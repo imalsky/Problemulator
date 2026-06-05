@@ -1,30 +1,22 @@
 {
-  // lstm_final: the LSTM side of the full-5M, matched-parameter head-to-head.
-  // This is the strong baseline that transformer_final must beat.
+  // lstm_final: 10M-parameter full-5M LSTM run.
   //
-  // Architecture is the proven lstm_main FAMILY (2 bidirectional layers, the
-  // stack that beat the old transformer_main at 5M: val 4.4e-6 vs 6.3e-6), but
-  // WIDTH-MATCHED to transformer_final's reduced budget: d_model=328 (down from
-  // lstm_main's 464) -> 4,000,290 params, ~equal to the d256 transformer. Only
-  // the width is scaled; the training PROTOCOL matches transformer_final exactly.
+  // Goal: provide the strongest matched-parameter LSTM baseline for the
+  // transformer_final comparison. The architecture keeps the proven full-data
+  // LSTM family: 2 bidirectional recurrent blocks, zero dropout, FiLM global
+  // conditioning, and the same signed-log target loss.
   //
-  // Changes vs lstm_main (applied identically to transformer_final, so the
-  // comparison isolates architecture):
-  //   - use_amp = true, bfloat16 autocast (requested; float32 weights/optimizer/
-  //     loss preserved).
-  //   - ema_decay = 0.999 (weight averaging; helps both models' generalization).
-  //   - epochs 200 -> 300, cosine to 1e-8, early_stopping_patience=30
-  //     (min_delta 1e-10): reasonable early stop that won't cut a still-
-  //     improving run short.
-  //   - batch 256 -> 1024 + num_workers 1 -> 16 to saturate the GH200; lr
-  //     1e-4 -> 2e-4 (sqrt-scaled for the 4x batch).
-  // Everything else follows lstm_main's schedule: wd 1e-5,
-  // AdamW betas 0.9/0.999, 10-epoch step-warmup (start factor 0.1), cosine to
-  // 1e-8, grad clip 2.0, dropout 0, full 5M data.
+  // Architecture: d_model=519 hits the requested 10M parameter budget almost
+  // exactly. This is the only architecture change from the proven 2-layer
+  // bidirectional LSTM family.
   //
   // Parameter match (verified by instantiating create_prediction_model):
-  //   lstm_final:        4,000,290 params
-  //   transformer_final: 4,024,322 params   (+0.60%)
+  //   lstm_final:        9,997,499 params
+  //   transformer_final: 9,734,146 params   (-2.63%)
+  //
+  // Training changes vs the previous 4M final: batch size 1024 -> 512, LR stays
+  // 2e-4, warmup remains 10 epochs, early-stopping patience stays at 30, and
+  // AMP is disabled so final accuracy is measured without bf16 autocast.
   "miscellaneous_settings": {
     "random_seed": 42,
     "num_workers": 16,
@@ -106,12 +98,12 @@
     "forward_dtype": "float32",
     "loss_dtype": "float32",
     "optimizer_state_dtype": "float32",
-    "amp_autocast_dtype": "bfloat16",
+    "amp_autocast_dtype": "none",
     "float32_matmul_precision": "high"
   },
   "model_hyperparameters": {
     "model_type": "lstm",
-    "d_model": 328,
+    "d_model": 519,
     "dropout": 0.0,
     "film_clamp": 1000.0,
     "max_sequence_length": 75,
@@ -134,7 +126,7 @@
   },
   "training_hyperparameters": {
     "epochs": 300,
-    "batch_size": 1024,
+    "batch_size": 512,
     "learning_rate": 0.0002,
     "weight_decay": 1e-5,
     "optimizer": "adamw",
@@ -152,7 +144,7 @@
     "plateau_threshold_mode": "abs",
     "early_stopping_patience": 30,
     "min_delta": 1e-10,
-    "use_amp": true,
+    "use_amp": false,
     "ema_decay": 0.999,
     "dataset_fraction_to_use": 1.0
   },

@@ -12,7 +12,7 @@
   //
   // Parameter match (verified by instantiating create_prediction_model):
   //   transformer_final: 9,734,146 params
-  //   lstm_final:        9,997,499 params   (+2.71%)
+  //   lstm_final:        9,730,050 params   (-0.04%)
   //
   // Training changes vs the previous 4M final: batch size 1024 -> 512, LR stays
   // 2e-4, warmup remains 10 epochs, early-stopping patience stays at 30, and

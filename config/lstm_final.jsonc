@@ -6,13 +6,13 @@
   // LSTM family: 2 bidirectional recurrent blocks, zero dropout, FiLM global
   // conditioning, and the same signed-log target loss.
   //
-  // Architecture: d_model=519 hits the requested 10M parameter budget almost
-  // exactly. This is the only architecture change from the proven 2-layer
-  // bidirectional LSTM family.
+  // Architecture: d_model=512 keeps the LSTM in the proven 2-layer
+  // bidirectional family while using hardware-friendly power-of-two dense
+  // dimensions. The parameter count remains within 10% of the 10M target.
   //
   // Parameter match (verified by instantiating create_prediction_model):
-  //   lstm_final:        9,997,499 params
-  //   transformer_final: 9,734,146 params   (-2.63%)
+  //   lstm_final:        9,730,050 params
+  //   transformer_final: 9,734,146 params   (+0.04%)
   //
   // Training changes vs the previous 4M final: batch size 1024 -> 512, LR stays
   // 2e-4, warmup remains 10 epochs, early-stopping patience stays at 30, and
@@ -103,7 +103,7 @@
   },
   "model_hyperparameters": {
     "model_type": "lstm",
-    "d_model": 519,
+    "d_model": 512,
     "dropout": 0.0,
     "film_clamp": 1000.0,
     "max_sequence_length": 75,

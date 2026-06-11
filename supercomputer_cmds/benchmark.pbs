@@ -6,26 +6,37 @@
 #PBS -l walltime=02:00:00
 #PBS -j oe
 
-# PBS (NAS GH200) inference benchmark: times the emulator forward pass on one
-# GPU and writes models/<dir>/inference_benchmark_cuda.json per model. This
-# fills the dedicated-GPU timing placeholders in the manuscript ("Inference
-# Time" section / Table tab:timing) and the reviewer response. The methodology
-# matches testing/paper_revision.ipynb cell 39 and the MPS/CPU JSONs (10 warmup
-# calls, 5 repeats x 3 calls), with torch.cuda.synchronize() around every timed
-# region, so the numbers are directly comparable.
+# PBS (NAS GH200) inference benchmark: times the emulator forward pass on the
+# Grace CPU and the GH200 GPU (batch sizes 1..2048) via
+# testing/make_benchmark_figure.py, which drives benchmark_inference_cuda.py
+# (10 warmup calls, 5 repeats x 3 calls, device sync around every timed region;
+# same methodology as the manuscript's MPS numbers, so all JSONs are directly
+# comparable). Per model it writes models/<dir>/inference_benchmark_{cpu,cuda}.json,
+# mirrors them to the GIT-TRACKED testing/benchmarks/ dir, and renders a preview
+# figure to testing/figs/. This fills the dedicated-GPU timing placeholders in
+# the manuscript ("Inference Time" section / Table tab:timing).
 #
 # Submit from the repo root (or Problemulator/) after a git pull:
 #     qsub Problemulator/supercomputer_cmds/benchmark.pbs
 #
+# When the job finishes, push the numbers home (from the NAS checkout):
+#     git add testing/benchmarks
+#     git commit -m "GH200 benchmark JSONs"
+#     git push
+# then locally: git pull, and rebuild the paper figure with:
+#     conda run -n nn python testing/make_benchmark_figure.py
+#
 # Overrides (PBS passes env through -v):
 #     qsub -v MODEL_DIRS="models/transformer_main models/lstm_main" Problemulator/supercomputer_cmds/benchmark.pbs
 #     qsub -v BATCH_SIZES="1,8,128,256,512" Problemulator/supercomputer_cmds/benchmark.pbs
+#     qsub -v DEVICES="cuda" Problemulator/supercomputer_cmds/benchmark.pbs
 #     qsub -v CONDA_ENV=pyt2_8_gh Problemulator/supercomputer_cmds/benchmark.pbs
 #
 # NOTE: models/ is NOT tracked by git, so a git pull does not bring the model
 # weights. Each benchmarked dir needs best_model.pt + train_config.json on the
 # NAS. If models/transformer_main or models/lstm_main are missing there, copy
 # them up first (run from local Problemulator/, one command per line):
+#     ssh pfe mkdir -p /nobackupp17/imalsky/Problemulator/models/transformer_main /nobackupp17/imalsky/Problemulator/models/lstm_main
 #     scp models/transformer_main/best_model.pt pfe:/nobackupp17/imalsky/Problemulator/models/transformer_main/
 #     scp models/transformer_main/train_config.json pfe:/nobackupp17/imalsky/Problemulator/models/transformer_main/
 #     scp models/lstm_main/best_model.pt pfe:/nobackupp17/imalsky/Problemulator/models/lstm_main/
@@ -62,9 +73,9 @@ fi
 cd "$PROBLEMULATOR_ROOT"
 
 CONDA_ENV="${CONDA_ENV:-pyt2_8_gh}"   # NAS GH200 aarch64 PyTorch 2.8 env
-DEVICE="${DEVICE:-cuda}"
+DEVICES="${DEVICES:-cpu,cuda}"
 MODEL_DIRS="${MODEL_DIRS:-models/transformer_main models/lstm_main}"
-BATCH_SIZES="${BATCH_SIZES:-1,2,4,8,16,32,64,128,256}"
+BATCH_SIZES="${BATCH_SIZES:-1,2,4,8,16,32,64,128,256,512,1024,2048}"
 
 # Live log directory on the shared filesystem (NOT the PBS spool).
 JOB_TAG="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
@@ -93,7 +104,7 @@ conda activate "$CONDA_ENV" || {
 echo "------------------------------------------------"
 echo "Problemulator root:  $PROBLEMULATOR_ROOT"
 echo "Conda env:           $CONDA_ENV"
-echo "Device:              $DEVICE"
+echo "Devices:             $DEVICES"
 echo "Model dirs:          $MODEL_DIRS"
 echo "Batch sizes:         $BATCH_SIZES"
 echo "Live logs:           $LOG_DIR"
@@ -115,13 +126,16 @@ if [[ "$missing" == "1" ]]; then
 fi
 
 for mdir in "${MODEL_DIR_ARRAY[@]}"; do
-    echo "=== Benchmarking $mdir on $DEVICE ==="
-    python -u testing/benchmark_inference_cuda.py \
-        --device "$DEVICE" \
+    echo "=== Benchmarking $mdir on $DEVICES ==="
+    python -u testing/make_benchmark_figure.py \
+        --run "$DEVICES" \
         --model-dir "$mdir" \
-        --batch-sizes "$BATCH_SIZES" 2>&1 | tee "$LOG_DIR/$(basename "$mdir").log"
+        --batch-sizes "$BATCH_SIZES" \
+        --out "testing/figs/reviewer_fig_benchmark_$(basename "$mdir").png" 2>&1 | tee "$LOG_DIR/$(basename "$mdir").log"
 done
-echo "=== Benchmark complete; JSONs written to each model dir ==="
-echo "Pull them back locally with (run from local Problemulator/):"
-echo "    scp pfe:/nobackupp17/imalsky/Problemulator/models/transformer_main/inference_benchmark_cuda.json models/transformer_main/"
-echo "    scp pfe:/nobackupp17/imalsky/Problemulator/models/lstm_main/inference_benchmark_cuda.json models/lstm_main/"
+echo "=== Benchmark complete ==="
+echo "JSONs: models/<dir>/inference_benchmark_{cpu,cuda}.json, mirrored to testing/benchmarks/."
+echo "Push them home with (run from this NAS checkout):"
+echo "    git add testing/benchmarks"
+echo "    git commit -m 'GH200 benchmark JSONs'"
+echo "    git push"

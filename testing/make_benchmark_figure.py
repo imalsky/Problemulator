@@ -7,7 +7,7 @@ Two-step, git-friendly workflow (models/ and testing/outputs/ are git-ignored):
          conda run -n nn python testing/make_benchmark_figure.py --run cpu,cuda
      This invokes testing/benchmark_inference_cuda.py once per device with
      batch sizes 1..2048, which writes models/<dir>/inference_benchmark_<device>.json;
-     each result is then mirrored to testing/benchmarks/inference_benchmark_<device>.json
+     each result is then mirrored to testing/benchmarks/<model>__inference_benchmark_<device>.json
      (a tracked dir; models/ and testing/outputs/ are git-ignored) so a plain
      `git add testing/benchmarks && git push` carries the numbers home.
 
@@ -52,14 +52,18 @@ DEFAULT_BATCH_SIZES = [2**k for k in range(12)]  # 1 .. 2048
 
 # Order also sets plot order; the first available entry of each class is used.
 KNOWN_DEVICES = ["cpu", "cuda", "mps"]
-DEVICE_COLORS = {"cpu": "#444444", "cuda": "#1f77b4", "mps": "#1f77b4"}
-DEVICE_MARKERS = {"cpu": "o", "cuda": "s", "mps": "s"}
+DEVICE_COLORS = {"cpu": "#444444", "cuda": "#1f77b4", "mps": "#2ca02c"}
+DEVICE_MARKERS = {"cpu": "o", "cuda": "s", "mps": "^"}
 
 
 def device_json_paths(model_dir: Path, device: str) -> list[Path]:
-    """Candidate locations for one device's benchmark JSON, most-fresh first."""
+    """Candidate locations for one device's benchmark JSON, most-fresh first.
+
+    The git-synced mirror is prefixed with the model name so that benchmarks of
+    different models (e.g. transformer_main and lstm_main) do not collide.
+    """
     name = f"inference_benchmark_{device}.json"
-    return [model_dir / name, BENCH_DIR / name]
+    return [model_dir / name, BENCH_DIR / f"{model_dir.name}__{name}"]
 
 
 def load_device_results(model_dir: Path) -> dict[str, dict]:
@@ -95,7 +99,7 @@ def run_benchmarks(devices: list[str], model_dir: Path, batch_sizes: list[int],
         if not src.is_file():
             raise FileNotFoundError(f"benchmark runner did not produce {src}")
         BENCH_DIR.mkdir(exist_ok=True)
-        dst = BENCH_DIR / src.name
+        dst = BENCH_DIR / f"{model_dir.name}__{src.name}"
         shutil.copy2(src, dst)
         print(f"[fig] mirrored {src.name} -> {dst.relative_to(PROJECT_ROOT)} (tracked)")
 

@@ -76,7 +76,15 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=2048)
     ap.add_argument("--max-batches", type=int, default=0, help="0 = full test set")
     ap.add_argument("--device", type=str, default="auto")
+    ap.add_argument("--model-dir", type=str, default="transformer_main",
+                    help="model folder name under models/ (must share this project's normalization)")
     args = ap.parse_args()
+
+    global MODEL_DIR, PERCENT_JSON
+    MODEL_DIR = PROJECT_ROOT / "models" / args.model_dir
+    block_name = "transformer" if args.model_dir == "transformer_main" else args.model_dir
+    if args.model_dir != "transformer_main":
+        PERCENT_JSON = OUTPUTS_DIR / f"percent_error_full_{args.model_dir}.json"
 
     device = pick_device(args.device)
     print(f"[verify] device={device}  batch_size={args.batch_size}  "
@@ -195,12 +203,12 @@ def main() -> int:
     payload = {"meta": meta, "channels": results}
     PERCENT_JSON.write_text(json.dumps(payload, indent=2))
 
-    # Augment per_channel_test_errors.json transformer block (full-set values).
+    # Augment per_channel_test_errors.json model block (full-set values).
     pcj = json.loads(PER_CHANNEL_JSON.read_text()) if PER_CHANNEL_JSON.exists() else {}
-    pcj.setdefault("transformer", {})
+    pcj.setdefault(block_name, {})
     for n, s in results.items():
-        pcj["transformer"][n] = s
-    pcj.setdefault("_meta", {})["transformer_percent_error"] = meta
+        pcj[block_name][n] = s
+    pcj.setdefault("_meta", {})[f"{block_name}_percent_error"] = meta
     PER_CHANNEL_JSON.write_text(json.dumps(pcj, indent=2))
 
     # Report.

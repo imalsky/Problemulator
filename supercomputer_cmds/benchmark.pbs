@@ -1,0 +1,127 @@
+#!/bin/bash
+#PBS -N rt_bench
+#PBS -q gpu_normal
+#PBS -W group_list=s2458
+#PBS -l select=1:ncpus=72:ngpus=1:mem=400gb:model=gh200
+#PBS -l walltime=02:00:00
+#PBS -j oe
+
+# PBS (NAS GH200) inference benchmark: times the emulator forward pass on one
+# GPU and writes models/<dir>/inference_benchmark_cuda.json per model. This
+# fills the dedicated-GPU timing placeholders in the manuscript ("Inference
+# Time" section / Table tab:timing) and the reviewer response. The methodology
+# matches testing/paper_revision.ipynb cell 39 and the MPS/CPU JSONs (10 warmup
+# calls, 5 repeats x 3 calls), with torch.cuda.synchronize() around every timed
+# region, so the numbers are directly comparable.
+#
+# Submit from the repo root (or Problemulator/) after a git pull:
+#     qsub Problemulator/supercomputer_cmds/benchmark.pbs
+#
+# Overrides (PBS passes env through -v):
+#     qsub -v MODEL_DIRS="models/transformer_main models/lstm_main" Problemulator/supercomputer_cmds/benchmark.pbs
+#     qsub -v BATCH_SIZES="1,8,128,256,512" Problemulator/supercomputer_cmds/benchmark.pbs
+#     qsub -v CONDA_ENV=pyt2_8_gh Problemulator/supercomputer_cmds/benchmark.pbs
+#
+# NOTE: models/ is NOT tracked by git, so a git pull does not bring the model
+# weights. Each benchmarked dir needs best_model.pt + train_config.json on the
+# NAS. If models/transformer_main or models/lstm_main are missing there, copy
+# them up first (run from local Problemulator/, one command per line):
+#     scp models/transformer_main/best_model.pt pfe:/nobackupp17/imalsky/Problemulator/models/transformer_main/
+#     scp models/transformer_main/train_config.json pfe:/nobackupp17/imalsky/Problemulator/models/transformer_main/
+#     scp models/lstm_main/best_model.pt pfe:/nobackupp17/imalsky/Problemulator/models/lstm_main/
+#     scp models/lstm_main/train_config.json pfe:/nobackupp17/imalsky/Problemulator/models/lstm_main/
+#
+# Live log: Problemulator/logs/bench_<jobid>/job.log (PBS only returns its -o
+# file when the job ends).
+
+set -euo pipefail
+
+resolve_problemulator_root() {
+    local start_dir="$1"
+    if [[ -d "$start_dir/src" && -d "$start_dir/config" ]]; then
+        cd "$start_dir" && pwd
+    elif [[ -d "$start_dir/Problemulator/src" && -d "$start_dir/Problemulator/config" ]]; then
+        cd "$start_dir/Problemulator" && pwd
+    elif [[ -d "$start_dir/../src" && -d "$start_dir/../config" ]]; then
+        cd "$start_dir/.." && pwd
+    elif [[ -d "$start_dir/../Problemulator/src" && -d "$start_dir/../Problemulator/config" ]]; then
+        cd "$start_dir/../Problemulator" && pwd
+    else
+        echo "Could not resolve Problemulator root from: $start_dir" >&2
+        return 1
+    fi
+}
+
+# PBS sets PBS_O_WORKDIR to the directory from which qsub was invoked.
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+    PROBLEMULATOR_ROOT="$(resolve_problemulator_root "$PBS_O_WORKDIR")"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROBLEMULATOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
+cd "$PROBLEMULATOR_ROOT"
+
+CONDA_ENV="${CONDA_ENV:-pyt2_8_gh}"   # NAS GH200 aarch64 PyTorch 2.8 env
+DEVICE="${DEVICE:-cuda}"
+MODEL_DIRS="${MODEL_DIRS:-models/transformer_main models/lstm_main}"
+BATCH_SIZES="${BATCH_SIZES:-1,2,4,8,16,32,64,128,256}"
+
+# Live log directory on the shared filesystem (NOT the PBS spool).
+JOB_TAG="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_TAG="${JOB_TAG//\//_}"
+LOG_DIR="$PROBLEMULATOR_ROOT/logs/bench_${JOB_TAG}"
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG_DIR/job.log") 2>&1
+
+# ----- Conda env (NAS GH200 module stack; PyTorch's aarch64 CUDA build bundles
+# its own runtime, so no separate cuda module is loaded) -----
+module purge 2>/dev/null || true
+module use -a /swbuild/analytix/tools/modulefiles 2>/dev/null || true
+module load miniconda3/gh2 2>/dev/null || true
+CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+if [[ -z "$CONDA_BASE" ]]; then
+    echo "conda not found after 'module load miniconda3/gh2'." >&2
+    exit 1
+fi
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$CONDA_ENV" || {
+    echo "Failed to activate Conda env '$CONDA_ENV'. On the GH200 (aarch64) this" >&2
+    echo "must be an aarch64 PyTorch env; override with -v CONDA_ENV=<your env>." >&2
+    exit 1
+}
+
+echo "------------------------------------------------"
+echo "Problemulator root:  $PROBLEMULATOR_ROOT"
+echo "Conda env:           $CONDA_ENV"
+echo "Device:              $DEVICE"
+echo "Model dirs:          $MODEL_DIRS"
+echo "Batch sizes:         $BATCH_SIZES"
+echo "Live logs:           $LOG_DIR"
+echo "GPU(s) visible:"
+nvidia-smi -L 2>/dev/null || echo "  (nvidia-smi unavailable)"
+echo "------------------------------------------------"
+python -c "import torch; print('torch', torch.__version__, '| cuda available:', torch.cuda.is_available(), '|', (torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no-gpu'))"
+
+missing=0
+read -r -a MODEL_DIR_ARRAY <<< "$MODEL_DIRS"
+for mdir in "${MODEL_DIR_ARRAY[@]}"; do
+    if [[ ! -f "$PROBLEMULATOR_ROOT/$mdir/best_model.pt" ]]; then
+        echo "ERROR: $mdir/best_model.pt not found on this filesystem (models/ is not in git; see the scp note in this script's header)." >&2
+        missing=1
+    fi
+done
+if [[ "$missing" == "1" ]]; then
+    exit 1
+fi
+
+for mdir in "${MODEL_DIR_ARRAY[@]}"; do
+    echo "=== Benchmarking $mdir on $DEVICE ==="
+    python -u testing/benchmark_inference_cuda.py \
+        --device "$DEVICE" \
+        --model-dir "$mdir" \
+        --batch-sizes "$BATCH_SIZES" 2>&1 | tee "$LOG_DIR/$(basename "$mdir").log"
+done
+echo "=== Benchmark complete; JSONs written to each model dir ==="
+echo "Pull them back locally with (run from local Problemulator/):"
+echo "    scp pfe:/nobackupp17/imalsky/Problemulator/models/transformer_main/inference_benchmark_cuda.json models/transformer_main/"
+echo "    scp pfe:/nobackupp17/imalsky/Problemulator/models/lstm_main/inference_benchmark_cuda.json models/lstm_main/"

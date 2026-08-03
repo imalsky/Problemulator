@@ -1,0 +1,12 @@
+
+======================================================================
+[run] variant=_final  TF=transformer_final  LSTM=lstm_final
+======================================================================
+[run] variant=_final DONE in 159s  cell_errors=0  figs=18 -> /Users/imalsky/Desktop/Emulators/RT-Project/Problemulator_extra_runs/testing/figs_final
+
+======================================================================
+[run] variant=_4m  TF=transformer_4m_full_compare  LSTM=lstm_4m_full_compare
+======================================================================
+[run] variant=_4m DONE in 107s  cell_errors=0  figs=18 -> /Users/imalsky/Desktop/Emulators/RT-Project/Problemulator_extra_runs/testing/figs_4m
+
+[run] ALL VARIANTS COMPLETE

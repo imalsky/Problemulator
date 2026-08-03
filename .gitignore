@@ -42,3 +42,12 @@ Thumbs.db
 # Environment
 .env
 *.env
+
+# Local reference material folded in from the retired Problemulator_extra_runs
+# checkout: PBS cluster logs, and outputs that collided with newer versions
+# (kept side-by-side rather than overwritten). Local-only, like logs/ above.
+logs_extra_runs/
+testing/_archive_extra_runs/
+
+# Stray LaTeX scratch output
+texput.log
